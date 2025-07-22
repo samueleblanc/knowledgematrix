@@ -196,52 +196,46 @@ class NN(nn.Module):
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
             for i, layer in enumerate(layers):
+                if i in self.residuals: 
+                    x = self.apply_residual(x, outputs, layer=i)
                 if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, _ = layer(x)
                 else:
                     x = layer(x)
-                if i in self.residuals:
-                    for start_idx, proj in self.residuals[i]:
-                        x = x + proj(outputs[start_idx])
                 outputs.append(x)
 
         else:  # Forward pass for matrix computation
                # Save activations and preactivations
+            if return_penultimate:
+                raise ValueError("return_penultimate is not supported for matrix computation.")
             self.pre_acts: list[torch.Tensor] = []
             self.acts: list[torch.Tensor] = []
 
             for i, layer in enumerate(self.layers):
-                if isinstance(layer, nn.Conv2d):
-                    x = layer(x)
-                    self.pre_acts.append(x.detach().clone())
-                elif isinstance(layer, nn.BatchNorm2d):
+                if i in self.residuals: 
+                    x = self.apply_residual(x, outputs, layer=i)
+                if isinstance(layer, nn.BatchNorm2d):
                     self.acts.append(x.detach().clone())
                     x = layer(x)
-                    self.pre_acts.append(x.detach().clone())
-                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh)):
-                    x = layer(x)
-                    self.acts.append(x.detach().clone())
-                elif isinstance(layer, (nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
-                    x = layer(x)
-                    self.acts.append(x.detach().clone())
-                    self.pre_acts.append(x.detach().clone())
-                elif isinstance(layer, (nn.AdaptiveMaxPool2d, nn.MaxPool2d)):
+                elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
                     self.acts.append(indices)
                     self.pre_acts.append(indices)
-                elif isinstance(layer, nn.Linear):
+                elif isinstance(layer, (nn.Conv2d, nn.AdaptiveAvgPool2d, nn.AvgPool2d, nn.Linear, nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.Flatten)):
                     x = layer(x)
+                if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
+                    self.acts.append(x.detach().clone())
+                if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
+                    self.pre_acts.append(x.detach().clone())
+                elif isinstance(layer, nn.Linear):
                     if i < len(self.layers) - 1:
                         self.pre_acts.append(x.detach().clone())
-                elif isinstance(layer, nn.Flatten):
-                    x = layer(x)
-
-                if i in self.residuals:
-                    for start_idx, proj in self.residuals[i]:
-                        x = x + proj(outputs[start_idx])
-                
                 outputs.append(x.detach().clone())
+        return x
 
+    def apply_residual(self, x: torch.Tensor, outputs: list[torch.Tensor], layer: int,) -> torch.Tensor:
+        for start_idx, proj in self.residuals[layer]:
+            x = x + proj(outputs[start_idx])
         return x
 
 
@@ -261,23 +255,19 @@ class NN(nn.Module):
         return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm()))
     
     def _has_bias(self) -> bool:
-        has_bias = False
         for layer in self.layers:
             try: 
                 _ = layer.bias
-                has_bias = True
-                break
+                return True
             except:
                 continue
-        return has_bias
+        return False
 
     def _has_batchnorm(self) -> bool:
-        has_batchnorm = False
         for layer in self.layers:
             if isinstance(layer, nn.BatchNorm2d):
-                has_batchnorm = True
-                break
-        return has_batchnorm
+                return True
+        return False
 
     def get_input_size(self) -> int:
         input_size = 1
