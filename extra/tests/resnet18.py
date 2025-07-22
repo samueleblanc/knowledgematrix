@@ -59,6 +59,7 @@ class TestResNetRepresentation(unittest.TestCase):
             Test if building the matrix keeps the network function unchanged.
             Test memory usage and time taken.
         """
+        # TODO: Doesn't always pass the test.
         for test_num in range(5):
             print(f"\n--------------------------------")
             print(f"Test {test_num + 1}/5:")
@@ -96,6 +97,7 @@ class TestResNetRepresentation(unittest.TestCase):
             print(f"  -  Batch Size: {batch_size}")
             print(f"Performance:")
             print(f"  - Difference: {diff}  -  Time: {end_time-start_time:.6f}s  -  Memory: {mem_used:.4f}MB")
+            print(f"  - Relative Error: {diff / torch.norm(forward_pass).item()}")
             print(f"--------------------------------")
 
 

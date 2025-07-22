@@ -126,6 +126,7 @@ class TestMLPRepresentation(unittest.TestCase):
             print(f"  -  Batch Size: {batch_size}")
             print(f"Performance:")
             print(f"  - Difference: {diff}  -  Time: {end_time-start_time:.6f}s  -  Memory: {mem_used:.4f}MB")
+            print(f"  - Relative Error: {diff / torch.norm(forward_pass).item()}")
             print(f"--------------------------------")
 
 
