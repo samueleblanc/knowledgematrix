@@ -28,7 +28,7 @@ class TestAlexNetRepresentation(unittest.TestCase):
                 w: width of the input image
                 num_classes: number of classes in the output layer
         """
-        w = torch.randint(63,65)
+        w = random.randint(63,65)
         num_classes = random.randint(10,20)
         return w, num_classes
 
@@ -49,8 +49,8 @@ class TestAlexNetRepresentation(unittest.TestCase):
             num_classes = num_classes
         ).to(DEVICE)
         model.eval()
-        model.save = True
         forward_pass = model(x)
+        model.save = True
 
         return model, x, forward_pass, num_classes
 

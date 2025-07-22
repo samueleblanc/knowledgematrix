@@ -79,8 +79,8 @@ class TestMLPRepresentation(unittest.TestCase):
             num_classes = num_classes
         ).to(DEVICE)
         model.eval()
-        model.save = True
         forward_pass = model(x)
+        model.save = True
 
         return model, x, forward_pass, num_classes
 
@@ -89,7 +89,6 @@ class TestMLPRepresentation(unittest.TestCase):
             Test if building the matrix keeps the network function unchanged.
             Test memory usage and time taken.
         """
-        # TODO: There's a problem with residual connections.
         for test_num in range(10):
             print(f"\n--------------------------------")
             print(f"Test {test_num + 1}/10:")

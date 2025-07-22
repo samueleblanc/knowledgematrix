@@ -49,8 +49,8 @@ class TestVGGRepresentation(unittest.TestCase):
             num_classes = num_classes
         ).to(DEVICE)
         model.eval()
-        model.save = True
         forward_pass = model(x)
+        model.save = True
 
         return model, x, forward_pass, num_classes
 
