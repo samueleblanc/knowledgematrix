@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="knowledgematrix",
-    version="0.0.1",
+    version="0.1.0",
     description="Compute the knowledge matrices",
     author="Marco Armenta and Samuel Leblanc",
     maintainer="Samuel Leblanc",
