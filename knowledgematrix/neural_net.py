@@ -176,8 +176,8 @@ class NN(nn.Module):
                                     round(shape_start[3] / shape_end[3]),
                                 ),
                                 bias=False
-                            ),
-                            nn.BatchNorm2d(shape_end[1])
+                            )#,
+                            #nn.BatchNorm2d(shape_end[1])
                         ]
                     elif len(shape_start) <= 3 and len(shape_end) <= 3:  # FC
                         projection = [
