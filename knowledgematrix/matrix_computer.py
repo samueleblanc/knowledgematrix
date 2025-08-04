@@ -70,7 +70,7 @@ class KnowledgeMatrixComputer:
                 B = batched_input
                 inputs_residuals = [None] * self.model.get_num_layers()
                 for i, layer in enumerate(self.layers):
-                    # Process each layer type (Conv2d, AvgPool2d, Linear, BatchNorm2d, MaxPool2d)
+                    # Process each layer type (Conv2d, AvgPool2d, Linear, BatchNorm2d, MaxPool2d, etc.)
                     # applying the appropriate transformations and handling activation ratios
                     if i in self.model.residuals_starts:
                         inputs_residuals[i] = B.detach().clone()
@@ -108,7 +108,7 @@ class KnowledgeMatrixComputer:
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
-            if self.model._has_bias() or self.model._has_batchnorm():
+            if self.model._has_bias() or self.model._has_batchnorm() or len(self.model.residuals) > 0:
                 a = torch.zeros(x.shape).unsqueeze(0).to(self.device)
                 inputs_residuals = [None] * self.model.get_num_layers()
                 for i, layer in enumerate(self.layers):

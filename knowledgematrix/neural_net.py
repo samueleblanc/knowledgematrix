@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 from typing import Union, Dict, Tuple
 
 
@@ -24,7 +25,7 @@ class NN(nn.Module):
         self.save = save
         self.device = device
         self.layers = nn.ModuleList()
-        self.residuals: Dict[int, int] = {}
+        self.residuals: Dict[int, Tuple[int, list[nn.Module]]] = {}
         self.residuals_starts: set[int] = set()
 
 
@@ -164,8 +165,6 @@ class NN(nn.Module):
             else:
                 if len(shape_start) == len(shape_end):
                     if len(shape_start) >= 4 and len(shape_end) >= 4:  # Conv
-                        # TODO: There is a problem with batchnorm. It has to do with the fact that it's not linear, 
-                        # but affine.
                         projection = [
                             nn.Conv2d(
                                 shape_start[1], 
@@ -176,15 +175,15 @@ class NN(nn.Module):
                                     round(shape_start[3] / shape_end[3]),
                                 ),
                                 bias=False
-                            )#,
-                            #nn.BatchNorm2d(shape_end[1])
+                            ),
+                            nn.BatchNorm2d(shape_end[1])
                         ]
                     elif len(shape_start) <= 3 and len(shape_end) <= 3:  # FC
                         projection = [
                             nn.Linear(
                                 shape_start[-1],
                                 shape_end[-1],
-                                bias=False
+                                bias=True
                             )
                         ]
                 else:
@@ -245,12 +244,16 @@ class NN(nn.Module):
                 for layer in proj:
                     output = layer(output)
                 x = x + output
-        else:  # NOTE: Currently not used, since there's a problem with batchnorm.
+        else:
             for start_idx, proj in self.residuals[layer]:
                 output = outputs[start_idx]
                 for layer in proj:
                     if isinstance(layer, nn.BatchNorm2d):
                         output = output * (layer.weight.data/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
+                    elif isinstance(layer, nn.Linear):
+                        output = torch.matmul(layer.weight.data, output.T).T
+                    elif isinstance(layer, nn.Conv2d):
+                        output = F.conv2d(output, layer.weight.data, None, stride=layer.stride, padding=layer.padding)
                     else:
                         output = layer(output)
                 x = x + output
@@ -295,3 +298,11 @@ class NN(nn.Module):
     
     def get_num_layers(self) -> int:
         return len(self.layers)
+
+    def eval(self) -> None:
+        for layer in self.layers:
+            layer.eval()
+        for end in self.residuals:
+            for _, proj in self.residuals[end]:
+                for layer in proj:
+                    layer.eval()
