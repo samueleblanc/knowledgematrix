@@ -176,8 +176,8 @@ class NN(nn.Module):
                                     round(shape_start[3] / shape_end[3]),
                                 ),
                                 bias=False
-                            )#,
-                            #nn.BatchNorm2d(shape_end[1])
+                            ),
+                            nn.BatchNorm2d(shape_end[1])
                         ]
                     elif len(shape_start) <= 3 and len(shape_end) <= 3:  # FC
                         projection = [
@@ -275,7 +275,7 @@ class NN(nn.Module):
     def _has_bias(self) -> bool:
         for layer in self.layers:
             try: 
-                _ = layer.bias
+                _ = layer.bias.data
                 return True
             except:
                 continue
