@@ -25,6 +25,7 @@ class NN(nn.Module):
         self.device = device
         self.layers = nn.ModuleList()
         self.residuals: Dict[int, int] = {}
+        self.residuals_starts: set[int] = set()
 
 
     ### Linear Layers ###
@@ -48,7 +49,7 @@ class NN(nn.Module):
             kernel_size: Tuple[int], 
             stride: Tuple[int]=(1,1), 
             padding: Tuple[int]=(0,0), 
-            bias: bool=False
+            bias: bool=True
         ) -> None:
         self.layers.append(nn.Conv2d(
             in_channels=in_channels, 
@@ -159,29 +160,38 @@ class NN(nn.Module):
         shape_end = self.shape_at_layer(end)
         if (start < end):
             if shape_start == shape_end:
-                projection = nn.Identity()
+                projection = [nn.Identity()]
             else:
                 if len(shape_start) == len(shape_end):
                     if len(shape_start) >= 4 and len(shape_end) >= 4:  # Conv
-                        projection = nn.Conv2d(
-                            shape_start[1], 
-                            shape_end[1], 
-                            kernel_size=1,
-                            stride = (
-                                round(shape_start[2] / shape_end[2]),
-                                round(shape_start[3] / shape_end[3]),
-                            )
-                        )
+                        # TODO: There is a problem with batchnorm. It has to do with the fact that it's not linear, 
+                        # but affine.
+                        projection = [
+                            nn.Conv2d(
+                                shape_start[1], 
+                                shape_end[1], 
+                                kernel_size=1,
+                                stride = (
+                                    round(shape_start[2] / shape_end[2]),
+                                    round(shape_start[3] / shape_end[3]),
+                                ),
+                                bias=False
+                            )#,
+                            #nn.BatchNorm2d(shape_end[1])
+                        ]
                     elif len(shape_start) <= 3 and len(shape_end) <= 3:  # FC
-                        projection = nn.Linear(
-                            shape_start[-1],
-                            shape_end[-1]
-                        )
+                        projection = [
+                            nn.Linear(
+                                shape_start[-1],
+                                shape_end[-1],
+                                bias=False
+                            )
+                        ]
                 else:
                     raise ValueError(f"The lenghts of shape at layer {start} and {end} need to be equal to have a residual connection. Got {shape_start} and {shape_end}.")
         else:
             raise ValueError(f"To have a residual connection from layer {start} to {end}, one needs {start} < {end}.")
-        
+        self.residuals_starts.add(start)
         if end in self.residuals:
                 self.residuals[end].append((start, projection))
         else:
@@ -192,50 +202,58 @@ class NN(nn.Module):
 
     def forward(self, x: torch.Tensor, return_penultimate:bool=False) -> torch.Tensor:
         x = x.unsqueeze(0)
-        outputs = [x]
+        inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
             for i, layer in enumerate(layers):
+                if i in self.residuals_starts:
+                    inputs_residuals[i] = x.detach().clone()
                 if i in self.residuals: 
-                    x = self.apply_residual(x, outputs, layer=i)
+                    x = self.apply_residual(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, _ = layer(x)
                 else:
                     x = layer(x)
-                outputs.append(x)
-
         else:  # Forward pass for matrix computation
                # Save activations and preactivations
             if return_penultimate:
                 raise ValueError("return_penultimate is not supported for matrix computation.")
-            self.pre_acts: list[torch.Tensor] = []
-            self.acts: list[torch.Tensor] = []
+            self.pre_acts: list[torch.Tensor] = [None] * self.get_num_layers()
+            self.acts: list[torch.Tensor] = [None] * self.get_num_layers()
+            self.maxpool_indices: list[torch.Tensor] = [None] * self.get_num_layers()
 
             for i, layer in enumerate(self.layers):
+                if i in self.residuals_starts:
+                    inputs_residuals[i] = x.detach().clone()
                 if i in self.residuals: 
-                    x = self.apply_residual(x, outputs, layer=i)
-                if isinstance(layer, nn.BatchNorm2d):
-                    self.acts.append(x.detach().clone())
+                    x = self.apply_residual(x, inputs_residuals, layer=i)
+                if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
                     x = layer(x)
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
-                    self.acts.append(indices)
-                    self.pre_acts.append(indices)
-                elif isinstance(layer, (nn.Conv2d, nn.AdaptiveAvgPool2d, nn.AvgPool2d, nn.Linear, nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.Flatten)):
+                    self.maxpool_indices[i] = indices
+                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh)):
+                    self.pre_acts[i] = x.detach().clone()
                     x = layer(x)
-                if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
-                    self.acts.append(x.detach().clone())
-                if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
-                    self.pre_acts.append(x.detach().clone())
-                elif isinstance(layer, nn.Linear):
-                    if i < len(self.layers) - 1:
-                        self.pre_acts.append(x.detach().clone())
-                outputs.append(x.detach().clone())
+                    self.acts[i] = x.detach().clone()
         return x
 
-    def apply_residual(self, x: torch.Tensor, outputs: list[torch.Tensor], layer: int,) -> torch.Tensor:
-        for start_idx, proj in self.residuals[layer]:
-            x = x + proj(outputs[start_idx])
+    def apply_residual(self, x: torch.Tensor, outputs: list[torch.Tensor], layer: int, affine: bool=True) -> torch.Tensor:
+        if affine:
+            for start_idx, proj in self.residuals[layer]:
+                output = outputs[start_idx]
+                for layer in proj:
+                    output = layer(output)
+                x = x + output
+        else:  # NOTE: Currently not used, since there's a problem with batchnorm.
+            for start_idx, proj in self.residuals[layer]:
+                output = outputs[start_idx]
+                for layer in proj:
+                    if isinstance(layer, nn.BatchNorm2d):
+                        output = output * (layer.weight.data/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
+                    else:
+                        output = layer(output)
+                x = x + output
         return x
 
 
