@@ -59,7 +59,6 @@ class TestResNetRepresentation(unittest.TestCase):
             Test if building the matrix keeps the network function unchanged.
             Test memory usage and time taken.
         """
-        # TODO: Doesn't always pass the test.
         for test_num in range(5):
             print(f"\n--------------------------------")
             print(f"Test {test_num + 1}/5:")
