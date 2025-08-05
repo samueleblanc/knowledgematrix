@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="knowledgematrix",
-    version="0.1.0",
+    version="0.1.1",
     description="Compute the knowledge matrices",
     author="Marco Armenta and Samuel Leblanc",
     maintainer="Samuel Leblanc",
@@ -11,6 +11,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "torch>=2.0",
+        "torchvision>=0.15"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
