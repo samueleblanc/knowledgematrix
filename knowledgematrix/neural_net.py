@@ -249,11 +249,11 @@ class NN(nn.Module):
                 output = outputs[start_idx]
                 for layer in proj:
                     if isinstance(layer, nn.BatchNorm2d):
-                        output = output * (layer.weight.data/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
+                        output = output * (layer.weight/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
                     elif isinstance(layer, nn.Linear):
-                        output = torch.matmul(layer.weight.data, output.T).T
+                        output = torch.matmul(layer.weight, output.T).T
                     elif isinstance(layer, nn.Conv2d):
-                        output = F.conv2d(output, layer.weight.data, None, stride=layer.stride, padding=layer.padding)
+                        output = F.conv2d(output, layer.weight, None, stride=layer.stride, padding=layer.padding)
                     else:
                         output = layer(output)
                 x = x + output

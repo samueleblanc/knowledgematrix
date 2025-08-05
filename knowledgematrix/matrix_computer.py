@@ -88,13 +88,13 @@ class KnowledgeMatrixComputer:
                         ).squeeze(0)  # Remove original batch dim
                         B = B * vertices
                     elif isinstance(layer, nn.Conv2d):
-                        B = F.conv2d(B, layer.weight.data, None, stride=layer.stride, padding=layer.padding)
+                        B = F.conv2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding)
                     elif isinstance(layer, (nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Flatten)):
                         B = layer(B)
                     elif isinstance(layer, nn.Linear):
-                        B = torch.matmul(layer.weight.data, B.T).T
+                        B = torch.matmul(layer.weight, B.T).T
                     elif isinstance(layer, nn.BatchNorm2d):
-                        B = B * (layer.weight.data/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
+                        B = B * (layer.weight/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(current_batch_size).view(-1,1,1,1)
