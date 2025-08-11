@@ -42,6 +42,7 @@ class KnowledgeMatrixComputer:
             # Saves activations and pre-activations
             self.model.save = True
             self.current_output = self.model.forward(x)
+            self.model.save = False
 
             # Total number of positions and batches needed
             C, H, W = self.in_c, self.in_h, self.in_w
