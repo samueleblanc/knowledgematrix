@@ -200,7 +200,6 @@ class NN(nn.Module):
     ### Forward Method ###
 
     def forward(self, x: torch.Tensor, return_penultimate:bool=False) -> torch.Tensor:
-        x = x.unsqueeze(0)
         inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
@@ -306,3 +305,11 @@ class NN(nn.Module):
             for _, proj in self.residuals[end]:
                 for layer in proj:
                     layer.eval()
+
+    def train(self) -> None:
+        for layer in self.layers:
+            layer.train()
+        for end in self.residuals:
+            for _, proj in self.residuals[end]:
+                for layer in proj:
+                    layer.train()
