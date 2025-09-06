@@ -313,3 +313,31 @@ class NN(nn.Module):
             for _, proj in self.residuals[end]:
                 for layer in proj:
                     layer.train()
+
+    def freeze(self) -> None:
+        # Puts requires_grad = False to all parameters of all layers
+        self._freeze_or_unfreeze(freeze=True)
+    
+    def freeze_at_layer(self, layer: int) -> None:
+        # Puts requires_grad = False to all parameters of the specified layer
+        for param in self.layers[layer].parameters():
+            param.requires_grad = False
+
+    def unfreeze(self) -> None:
+        # Puts requires_grad = True to all parameters of all layers
+        self._freeze_or_unfreeze(freeze=False)
+    
+    def unfreeze_at_layer(self, layer: int) -> None:
+        # Puts requires_grad = True to all parameters of the specified layer
+        for param in self.layers[layer].parameters():
+            param.requires_grad = True
+
+    def _freeze_or_unfreeze(self, freeze: bool=True) -> None:
+        for layer in self.layers:
+            for param in layer.parameters():
+                param.requires_grad = not freeze
+        for end in self.residuals:
+            for _, proj in self.residuals[end]:
+                for layer in proj:
+                    for param in layer.parameters():
+                        param.requires_grad = not freeze
