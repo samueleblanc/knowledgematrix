@@ -3,6 +3,7 @@
 """
 from torch import nn
 from torchvision.models import resnet18, ResNet18_Weights
+from typing import Union
 
 from knowledgematrix.neural_net import NN
 
@@ -16,6 +17,7 @@ class ResNet18(NN):
             num_classes (int): The number of classes in the dataset.
             save (bool): Whether to save the activations and preactivations of the network.
             pretrained (bool): Whether to use pretrained weights.
+            pretrained_model (Union[resnet18, None]): You can pass in a custom resnet18 model to use as pretrained weights. If None, the default pretrained weights will be used.
             device (str): The device to run the network on.
     """
     def __init__(
@@ -24,14 +26,18 @@ class ResNet18(NN):
             num_classes: int,
             save: bool=False, 
             pretrained: bool=False,
+            pretrained_model: Union[resnet18, None]=None,
             device: str="cpu"
         ) -> None:
         super().__init__(input_shape, save, device)
     
         if pretrained:
-            if input_shape[0] != 3 or num_classes != 1000:
-                raise ValueError("ResNet18 was trained on images with 3 channels and 1000 classes. Please use input_shape=(3, -, -) and num_classes=1000 for pretrained ResNet18.")
-            for layer in resnet18(weights=ResNet18_Weights.DEFAULT).children():
+            if pretrained_model is None:
+                pretrained_model = resnet18(weights=ResNet18_Weights.DEFAULT)
+            else:
+                if not isinstance(pretrained_model, resnet18):
+                    raise ValueError("pretrained_model must be an instance of resnet18.")
+            for layer in pretrained_model.children():
                 if isinstance(layer, nn.Sequential):
                     for basic_block in layer.children():
                         start_skip = self.get_num_layers()
@@ -55,6 +61,12 @@ class ResNet18(NN):
                     self.flatten()
                 elif isinstance(layer, nn.MaxPool2d):
                     self.maxpool(kernel_size=layer.kernel_size, stride=layer.stride, padding=layer.padding)
+            if input_shape[0] != 3:
+                print(f"Warning: The pretrained model was trained on 3-channel images. The input shape is {input_shape}. The first layer won't have pretrained weights.")
+                self.layers[0] = nn.Conv2d(input_shape[0], 64, kernel_size=3, stride=1, padding=1, bias=False)
+            elif num_classes != 1000:
+                print(f"Warning: The pretrained model was trained on 1000 classes. The number of classes is {num_classes}. The last layer won't have pretrained weights.")
+                self.layers[-1] = nn.Linear(512, num_classes)
         else:
             self.conv(self.input_shape[0], 64, kernel_size=3, stride=1, padding=1, bias=False)
             self.batchnorm(64)

@@ -3,6 +3,7 @@
 """
 from torch import nn
 from torchvision.models import vgg11, VGG11_Weights
+from typing import Union
 
 from knowledgematrix.neural_net import NN
 
@@ -16,6 +17,7 @@ class VGG11(NN):
             num_classes (int): The number of classes in the dataset.
             save (bool): Whether to save the activations and preactivations of the network.
             pretrained (bool): Whether to use pretrained weights.
+            pretrained_model (Union[vgg11, None]): You can pass in a custom vgg11 model to use as pretrained weights. If None, the default pretrained weights will be used.
             device (str): The device to run the network on.
     """
     def __init__(
@@ -24,13 +26,18 @@ class VGG11(NN):
             num_classes: int,
             save: bool=False, 
             pretrained: bool=False,
+            pretrained_model: Union[vgg11, None]=None,
             device: str="cpu"
         ) -> None:
         super().__init__(input_shape, save, device)
+
         if pretrained:
-            if input_shape[0] != 3 or num_classes != 1000:
-                raise ValueError("VGG11 was trained on images with 3 channels and 1000 classes. Please use input_shape=(3, -, -) and num_classes=1000 for pretrained VGG11.")
-            for layer in vgg11(weights=VGG11_Weights.DEFAULT).children():
+            if pretrained_model is None:
+                pretrained_model = vgg11(weights=VGG11_Weights.DEFAULT)
+            else:
+                if not isinstance(pretrained_model, vgg11):
+                    raise ValueError("pretrained_model must be an instance of vgg11.")
+            for layer in pretrained_model.children():
                 if isinstance(layer, nn.Sequential):
                     for sublayer in layer.children():
                         if isinstance(sublayer, (nn.Conv2d, nn.Linear)):
@@ -44,6 +51,12 @@ class VGG11(NN):
                 elif isinstance(layer, nn.AdaptiveAvgPool2d):
                     self.adaptiveavgpool(output_size=layer.output_size)
                     self.flatten()
+            if input_shape[0] != 3:
+                print(f"Warning: The pretrained model was trained on 3-channel images. The input shape is {input_shape}. The first layer won't have pretrained weights.")
+                self.layers[0] = nn.Conv2d(input_shape[0], 64, kernel_size=3, padding=1)
+            elif num_classes != 1000:
+                print(f"Warning: The pretrained model was trained on 1000 classes. The number of classes is {num_classes}. The last layer won't have pretrained weights.")
+                self.layers[-1] = nn.Linear(4096, num_classes)
         else:
             # Convolutional Layers
             self.conv(input_shape[0], 64, kernel_size=3, padding=1)
