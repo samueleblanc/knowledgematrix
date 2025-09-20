@@ -61,6 +61,24 @@ class NN(nn.Module):
             bias=bias
         ))
     
+    def conv1d(
+            self, 
+            in_channels: int, 
+            out_channels: int, 
+            kernel_size: int, 
+            stride: int=1, 
+            padding: int=0, 
+            bias: bool=True
+        ) -> None:
+        self.layers.append(nn.Conv2d(
+            in_channels=in_channels, 
+            out_channels=out_channels, 
+            kernel_size=(kernel_size,1), 
+            stride=(stride,1), 
+            padding=(padding,0), 
+            bias=bias
+        ))
+    
     def flatten(
             self,
             start_dim: int=1,
@@ -85,6 +103,14 @@ class NN(nn.Module):
             momentum=momentum
         ))
     
+    def batchnorm1d(
+            self,
+            num_features: int,
+            eps: float=0.00001,
+            momentum: float=0.1
+    ) -> None:
+        self.batchnorm(num_features, eps, momentum)
+    
     
     ### Pooling Layers ###
 
@@ -102,11 +128,31 @@ class NN(nn.Module):
             padding=padding
         ))
     
+    def avgpool1d(
+            self,
+            kernel_size: int,
+            stride: Union[int,None]=None,
+            padding: int=0
+    ) -> None:
+        if stride is None:
+            stride = kernel_size
+        self.layers.append(nn.AvgPool2d(
+            kernel_size=(kernel_size,1),
+            stride=(stride,1),
+            padding=(padding,0)
+        ))
+    
     def adaptiveavgpool(
             self,
             output_size: int
     ) -> None:
         self.layers.append(nn.AdaptiveAvgPool2d(output_size=output_size))
+    
+    def adaptiveavgpool1d(
+            self,
+            output_size: int
+    ) -> None:
+        self.layers.append(nn.AdaptiveAvgPool2d(output_size=(output_size,1)))
     
     def maxpool(
             self, 
@@ -123,11 +169,32 @@ class NN(nn.Module):
             return_indices=True
         ))
     
+    def maxpool1d(
+            self, 
+            kernel_size: int,
+            stride: Union[int,None]=None,
+            padding: int=0
+        ) -> None:
+        if stride is None:
+            stride = kernel_size
+        self.layers.append(nn.MaxPool2d(
+            kernel_size=(kernel_size,1),
+            stride=(stride,1),
+            padding=(padding,0),
+            return_indices=True
+        ))
+    
     def adaptivemaxpool(
             self,
             output_size: int
     ) -> None:
         self.layers.append(nn.AdaptiveMaxPool2d(output_size=output_size, return_indices=True))
+
+    def adaptivemaxpool1d(
+            self,
+            output_size: int
+    ) -> None:
+        self.layers.append(nn.AdaptiveMaxPool2d(output_size=(output_size,1), return_indices=True))
 
 
     ### Dropout ###
@@ -200,6 +267,8 @@ class NN(nn.Module):
     ### Forward Method ###
 
     def forward(self, x: torch.Tensor, return_penultimate:bool=False) -> torch.Tensor:
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)
         inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers

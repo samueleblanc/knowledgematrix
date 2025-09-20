@@ -49,6 +49,8 @@ class KnowledgeMatrixComputer:
             total_positions = C*H*W
             num_batches = (total_positions + self.batch_size - 1)//self.batch_size
 
+            IN_2D = (W > 1)  # Wether the input is of shape (C,H,W) or (C,L,1)
+
             A = torch.Tensor().to(self.device)  # Will become the matrix M(W,f)(x)
 
             for batch in range(num_batches):
@@ -100,7 +102,7 @@ class KnowledgeMatrixComputer:
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(current_batch_size).view(-1,1,1,1)
                         channel_indices = torch.arange(pool.shape[1]).view(1,-1,1,1)
-                        row_indices = pool // B.shape[2]
+                        row_indices = pool // B.shape[2] if IN_2D else pool
                         col_indices = pool % B.shape[3]
                         B = B[batch_indices, channel_indices, row_indices, col_indices]
 
@@ -133,7 +135,7 @@ class KnowledgeMatrixComputer:
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(pool.shape[0]).view(-1,1,1,1)
                         channel_indices = torch.arange(pool.shape[1]).view(1,-1,1,1)
-                        row_indices = pool // a.shape[2]
+                        row_indices = pool // a.shape[2] if IN_2D else pool
                         col_indices = pool % a.shape[3]
                         a = a[batch_indices, channel_indices, row_indices, col_indices]
 
