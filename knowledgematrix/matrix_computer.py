@@ -13,17 +13,19 @@ class KnowledgeMatrixComputer:
         Args:
             model (NN): The neural network to compute the knowledge matrix of.
             batch_size (int): The batch size to use when computing the knowledge matrix.
+            device (Union[str, None]): The device to use when computing the knowledge matrix. If None, the device of the model is used.
     """
 
     def __init__(
             self,
             model: NN,
-            batch_size:int = 1
+            batch_size:int = 1,
+            device:Union[str, None] = None
         ) -> None:
         self.model = model
         self.batch_size = batch_size
         self.layers = model.layers
-        self.device = model.device
+        self.device = device if device is not None else model.device
         self.in_c, self.in_h, self.in_w = model.input_shape
         self.input_size = self.in_c*self.in_h*self.in_w
 
@@ -43,6 +45,7 @@ class KnowledgeMatrixComputer:
             self.model.save = True
             self.current_output = self.model.forward(x)
             self.model.save = False
+            self.model.to(self.device)
 
             # Total number of positions and batches needed
             C, H, W = self.in_c, self.in_h, self.in_w
