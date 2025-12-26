@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import math
 from typing import Union, Dict, Tuple
 
 
@@ -87,6 +88,26 @@ class NN(nn.Module):
             start_dim=start_dim,
             end_dim=end_dim
         ))
+    
+    def embedding(
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            padding_idx: Union[int,None]=None,
+            max_norm: Union[float,None]=None,
+            norm_type: float=2.0,
+            scale_grad_by_freq: bool=False,
+            sparse: bool=False
+    ) -> None:
+        self.layers.append(nn.Embedding(
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim,
+            padding_idx=padding_idx,
+            max_norm=max_norm,
+            norm_type=norm_type,
+            scale_grad_by_freq=scale_grad_by_freq,
+            sparse=sparse
+        ))
 
     
     ### Normalization Layers ###
@@ -111,7 +132,21 @@ class NN(nn.Module):
     ) -> None:
         self.batchnorm(num_features, eps, momentum)
     
-    
+    def layernorm(
+            self,
+            normalized_shape: Union[int,Tuple[int],torch.Size],
+            eps: float=1e-5,
+            elementwise_affine: bool=True,
+            bias: bool=True
+    ) -> None:
+        self.layers.append(nn.LayerNorm(
+            normalized_shape=normalized_shape,
+            eps=eps, 
+            elementwise_affine=elementwise_affine,
+            bias=bias
+        ))
+
+
     ### Pooling Layers ###
 
     def avgpool(
@@ -207,7 +242,10 @@ class NN(nn.Module):
 
     def elu(self, alpha: float=1) -> None:
         self.layers.append(nn.ELU(alpha=alpha))
-    
+
+    def gelu(self, approximate: str="none") -> None:
+        self.layers.append(nn.GELU(approximate=approximate))
+
     def leakyrelu(self, negative_slope: float=0.01) -> None:
         self.layers.append(nn.LeakyReLU(negative_slope=negative_slope))
 
@@ -217,8 +255,37 @@ class NN(nn.Module):
     def sigmoid(self) -> None:
         self.layers.append(nn.Sigmoid())
 
+    def silu(self) -> None:
+        self.layers.append(nn.SiLU())
+
+    def mish(self) -> None:
+        self.layers.append(nn.Mish())
+
+    def softmax(self, dim: Union[int,None]=None) -> None:
+        self.layers.append(nn.Softmax(dim=dim))
+
     def tanh(self) -> None:
         self.layers.append(nn.Tanh())
+
+    def multiheadattention(
+            self, 
+            d_model: int, 
+            num_heads: int, 
+            mask: Union[torch.Tensor,None]=None
+        ) -> None:
+        self.layers.append(
+            MultiHeadAttention(
+                d_model=d_model, 
+                num_heads=num_heads, 
+                mask=mask
+            )
+        )
+
+
+    ### Positional Encoding ###
+
+    def positionalencoding(self, d_model: int, max_len: int=5000) -> None:
+        self.layers.append(PositionalEncoding(d_model, max_len))
 
 
     ### Residual Connections ###
@@ -267,12 +334,17 @@ class NN(nn.Module):
     ### Forward Method ###
 
     def forward(self, x: torch.Tensor, return_penultimate:bool=False) -> torch.Tensor:
+        start_layer = self._get_start_layer()  # Start layer is the one after the embedding and positional encoding
+        for layer in self.layers[:start_layer]:
+            x = layer(x)
         if len(x.shape) == 3:
             x = x.unsqueeze(0)
+        # Update the input shape, useful when the input shape is not known beforehand (e.g. for transformers)
+        self.input_shape = (x.shape[1], x.shape[2], x.shape[3])
         inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
-            for i, layer in enumerate(layers):
+            for i, layer in enumerate(layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts:
                     inputs_residuals[i] = x.detach().clone()
                 if i in self.residuals: 
@@ -288,18 +360,23 @@ class NN(nn.Module):
             self.pre_acts: list[torch.Tensor] = [None] * self.get_num_layers()
             self.acts: list[torch.Tensor] = [None] * self.get_num_layers()
             self.maxpool_indices: list[torch.Tensor] = [None] * self.get_num_layers()
+            self.layernorms: list[torch.Tensor] = [None] * self.get_num_layers()
 
-            for i, layer in enumerate(self.layers):
+            for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts:
                     inputs_residuals[i] = x.detach().clone()
                 if i in self.residuals: 
                     x = self.apply_residual(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
                     x = layer(x)
+                elif isinstance(layer, nn.LayerNorm):
+                    dims = tuple(range(-len(layer.normalized_shape), 0))
+                    self.layernorms[i] = (torch.mean(x, dim=dims, keepdim=True), torch.var(x, dim=dims, unbiased=False, keepdim=True))
+                    x = layer(x)
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
                     self.maxpool_indices[i] = indices
-                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh)):
+                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
                     self.pre_acts[i] = x.detach().clone()
                     x = layer(x)
                     self.acts[i] = x.detach().clone()
@@ -332,7 +409,8 @@ class NN(nn.Module):
 
     def shape_at_layer(self, i: int) -> torch.Size:
         x = torch.randn(self.input_shape).unsqueeze(0)
-        for layer in self.layers[:i]:
+        start_layer = self._get_start_layer()
+        for layer in self.layers[start_layer:i]:
             if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                 x, _ = layer(x)
             else:
@@ -341,7 +419,7 @@ class NN(nn.Module):
 
     def get_matrix_shape(self) -> Tuple[int]:
         # Returns the shape of the knowledge matrix in the format: (rows, columns).
-        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm()))
+        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm()))
     
     def _has_bias(self) -> bool:
         for layer in self.layers:
@@ -355,6 +433,12 @@ class NN(nn.Module):
     def _has_batchnorm(self) -> bool:
         for layer in self.layers:
             if isinstance(layer, nn.BatchNorm2d):
+                return True
+        return False
+
+    def _has_layernorm(self) -> bool:
+        for layer in self.layers:
+            if isinstance(layer, nn.LayerNorm):
                 return True
         return False
 
@@ -410,3 +494,108 @@ class NN(nn.Module):
                 for layer in proj:
                     for param in layer.parameters():
                         param.requires_grad = not freeze
+
+    def _get_start_layer(self) -> int:
+        start_layer = 0
+        if isinstance(self.layers[0], nn.Embedding):
+            start_layer = 1
+            if isinstance(self.layers[1], PositionalEncoding):
+                start_layer = 2
+        return start_layer
+
+
+class PositionalEncoding(nn.Module):
+    """
+        Positional encoding for the transformer model.
+
+        Args:
+            d_model (int): The dimension of the model.
+            max_len (int): The maximum length of the input.
+        
+        Inspired by: https://medium.com/data-science/build-your-own-transformer-from-scratch-using-pytorch-84c850470dcb
+        which uses the positional encoding from the Attention is All You Need paper.
+    """
+    def __init__(self, d_model: int, max_len: int=5000) -> None:
+        super().__init__()
+        if d_model % 2 != 0:
+            raise ValueError("d_model must be even.")
+
+        pe = torch.zeros(max_len, d_model)
+
+        pos = torch.arange(0, max_len).unsqueeze(1)
+        div = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
+
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.pe[:, :x.size(1)]
+
+
+class MultiHeadAttention(nn.Module):
+    """
+        Multi-head attention for the transformer model. 
+
+        Args:
+            d_model (int): The dimension of the model.
+            num_heads (int): The number of heads.
+            mask (torch.Tensor): The mask to apply to the attention scores.
+        
+        Inspired by: https://medium.com/data-science/build-your-own-transformer-from-scratch-using-pytorch-84c850470dcb
+        which is inspired by the Attention is All You Need paper.
+    """
+    def __init__(
+            self, 
+            d_model: int, 
+            num_heads: int,
+            mask: Union[torch.Tensor,None]=None
+        ) -> None:
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads.")
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        self.mask = mask
+
+        self.Q = nn.Linear(d_model, d_model)
+        self.K = nn.Linear(d_model, d_model)
+        self.V = nn.Linear(d_model, d_model)
+        self.O = nn.Linear(d_model, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, B, T, D = x.shape
+
+        Q = self.Q(x)
+        K = self.K(x)
+        V = self.V(x)
+
+        Q = Q.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
+        K = K.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
+        V = V.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
+
+        scores = Q @ K.transpose(-2, -1) / math.sqrt(self.d_head)
+
+        if self.mask is not None:
+            scores = scores.masked_fill(self.mask == 0, float("-inf"))
+
+        attn = torch.softmax(scores, dim=-1)
+        out = attn @ V
+        out = out.transpose(2, 3).contiguous().view(batch, B, T, D)
+        return self.O(out)
+
+    def eval(self) -> None:
+        self.Q.eval()
+        self.K.eval()
+        self.V.eval()
+        self.O.eval()
+
+    def train(self) -> None:
+        self.Q.train()
+        self.K.train()
+        self.V.train()
+        self.O.train()
