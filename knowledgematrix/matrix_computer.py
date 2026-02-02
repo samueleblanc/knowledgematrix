@@ -57,10 +57,15 @@ class KnowledgeMatrixComputer:
             # Total number of positions and batches needed
             total_positions = C*H*W
             num_batches = (total_positions + self.batch_size - 1)//self.batch_size
+            output_size = self.current_output.numel()
+            dtype = self.current_output.dtype
 
             IN_2D = (W > 1)  # Wether the input is of shape (C,H,W) or (C,L,1)
 
-            A = torch.Tensor().to(self.device)  # Will become the matrix M(W,f)(x)
+            x = x.to(self.device)
+            _zero = torch.tensor(0.0, device=self.device, dtype=dtype)
+            inputs_residuals = [None] * self.model.get_num_layers()
+            A = torch.empty((output_size, total_positions), device=self.device, dtype=dtype)
 
             for batch in range(num_batches):
                 # Compute batch indices
@@ -76,16 +81,15 @@ class KnowledgeMatrixComputer:
                 w = remaining % W
 
                 # Create batched input for this chunk
-                batched_input = torch.zeros((current_batch_size,C,H,W), device=self.device)
-                batched_input[torch.arange(current_batch_size),c,h,w] = x.flatten()[start:end]
+                batched_input = torch.zeros((current_batch_size,C,H,W), device=self.device, dtype=dtype)
+                batched_input[torch.arange(current_batch_size, device=self.device),c,h,w] = x.flatten()[start:end]
 
                 B = batched_input
-                inputs_residuals = [None] * self.model.get_num_layers()
                 for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                     # Process each layer type (Conv2d, AvgPool2d, Linear, BatchNorm2d, MaxPool2d, etc.)
                     # applying the appropriate transformations and handling activation ratios
                     if i in self.model.residuals_starts:
-                        inputs_residuals[i] = B.detach().clone()
+                        inputs_residuals[i] = B
                     if i in self.model.residuals:
                         B = self.model.apply_residual(B, inputs_residuals, layer=i, affine=False)
                     if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
@@ -95,7 +99,7 @@ class KnowledgeMatrixComputer:
                         vertices = post_act / pre_act
                         vertices = torch.where(
                             torch.isnan(vertices) | torch.isinf(vertices),
-                            torch.tensor(0.0, device=self.device),
+                            _zero,
                             vertices
                         ).squeeze(0)  # Remove original batch dim
                         B = B * vertices
@@ -111,27 +115,24 @@ class KnowledgeMatrixComputer:
                         B = B * layer.weight/torch.sqrt(self.model.layernorms[i][1]+layer.eps)
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
-                        batch_indices = torch.arange(current_batch_size).view(-1,1,1,1)
-                        channel_indices = torch.arange(pool.shape[1]).view(1,-1,1,1)
+                        batch_indices = torch.arange(current_batch_size, device=self.device).view(-1,1,1,1)
+                        channel_indices = torch.arange(pool.shape[1], device=self.device).view(1,-1,1,1)
                         row_indices = pool // B.shape[2] if IN_2D else pool
                         col_indices = pool % B.shape[3]
                         B = B[batch_indices, channel_indices, row_indices, col_indices]
 
-                B = B.reshape(-1, self.current_output.reshape(1,-1).shape[1])
-                # Cat the vector produced to the matrix M(W,f)(x)
-                A = torch.cat((A,B.T),dim=-1) if A.numel() else B.T
+                B = B.reshape(-1, output_size)
+                A[:, start:end] = B.T
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
             if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or len(self.model.residuals) > 0:
-                a = torch.zeros(x.shape)
+                a = torch.zeros(x.shape, device=self.device, dtype=dtype)
                 if len(x.shape) == 3:
                     a = a.unsqueeze(0)
-                a = a.to(self.device)
-                inputs_residuals = [None] * self.model.get_num_layers()
                 for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                     if i in self.model.residuals_starts:
-                        inputs_residuals[i] = a.detach().clone()
+                        inputs_residuals[i] = a
                     if i in self.model.residuals:
                         a = self.model.apply_residual(a, inputs_residuals, layer=i)
                     if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
@@ -140,7 +141,7 @@ class KnowledgeMatrixComputer:
                         vertices = post_act / pre_act
                         vertices = torch.where(
                             torch.isnan(vertices) | torch.isinf(vertices),
-                            torch.tensor(0.0, device=self.device),
+                            _zero,
                             vertices
                         )
                         a = a * vertices
@@ -150,13 +151,13 @@ class KnowledgeMatrixComputer:
                         a = ((a - self.model.layernorms[i][0])/torch.sqrt(self.model.layernorms[i][1]+layer.eps))*layer.weight + layer.bias
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
-                        batch_indices = torch.arange(pool.shape[0]).view(-1,1,1,1)
-                        channel_indices = torch.arange(pool.shape[1]).view(1,-1,1,1)
+                        batch_indices = torch.arange(pool.shape[0], device=self.device).view(-1,1,1,1)
+                        channel_indices = torch.arange(pool.shape[1], device=self.device).view(1,-1,1,1)
                         row_indices = pool // a.shape[2] if IN_2D else pool
                         col_indices = pool % a.shape[3]
                         a = a[batch_indices, channel_indices, row_indices, col_indices]
 
-                a = a.reshape(-1, self.current_output.reshape(1,-1).shape[1])
+                a = a.reshape(-1, output_size)
                 return torch.cat((A, a.T), dim=-1)
             
             return A
