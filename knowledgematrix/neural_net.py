@@ -346,7 +346,7 @@ class NN(nn.Module):
             layers = self.layers[:-1] if return_penultimate else self.layers
             for i, layer in enumerate(layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts:
-                    inputs_residuals[i] = x.detach().clone()
+                    inputs_residuals[i] = x
                 if i in self.residuals: 
                     x = self.apply_residual(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
@@ -364,7 +364,7 @@ class NN(nn.Module):
 
             for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts:
-                    inputs_residuals[i] = x.detach().clone()
+                    inputs_residuals[i] = x
                 if i in self.residuals: 
                     x = self.apply_residual(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
