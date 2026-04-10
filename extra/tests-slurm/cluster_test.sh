@@ -1,9 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=km-test
-#SBATCH --gres=gpu:1
-#SBATCH --mem=80G
+#SBATCH --gpus=h100:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64G
 #SBATCH --time=01:00:00
 #SBATCH --output=km-test-%j.out
-# #SBATCH --partition=<your-partition>
+
+module load StdEnv/2023 python scipy-stack
 
 python3 extra/tests-slurm/cluster_test.py
