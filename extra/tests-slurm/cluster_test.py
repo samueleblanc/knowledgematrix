@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.float32)
 
 NUM_CLASSES = 10
 CALIBRATION_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -54,6 +54,7 @@ def phase1_smoke_test() -> bool:
     input_shape = (3, 32, 32)
     model = ResNet18(input_shape=input_shape, num_classes=NUM_CLASSES, device=DEVICE)
     model.eval()
+    model.to(DEVICE)
 
     x = torch.randn(input_shape, device=DEVICE)
     forward_pass = model(x)
@@ -81,6 +82,7 @@ def _calibrate_single_input(input_shape: tuple[int, ...]) -> dict:
 
     model = ResNet18(input_shape=input_shape, num_classes=NUM_CLASSES, device=DEVICE)
     model.eval()
+    model.to(DEVICE)
     x = torch.randn(input_shape, device=DEVICE)
 
     results = []
@@ -171,6 +173,7 @@ def phase3_dataset_computer(batch_size: int) -> bool:
     input_shape = (3, 32, 32)
     model = ResNet18(input_shape=input_shape, num_classes=NUM_CLASSES, device=DEVICE)
     model.eval()
+    model.to(DEVICE)
 
     data = [(torch.randn(input_shape, device=DEVICE), i) for i in range(20)]
 
@@ -226,6 +229,7 @@ def phase4_experiment_runner(batch_size: int) -> bool:
     input_shape = (3, 32, 32)
     model = ResNet18(input_shape=input_shape, num_classes=NUM_CLASSES, device=DEVICE)
     model.eval()
+    model.to(DEVICE)
 
     experiment_dir = tempfile.mkdtemp(prefix="km_experiment_test_")
     try:
