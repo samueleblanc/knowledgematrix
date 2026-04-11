@@ -238,9 +238,9 @@ def phase4_experiment_runner(batch_size: int) -> bool:
         os.makedirs(weights_dir, exist_ok=True)
         checkpoint_names = ["epoch_0", "epoch_10", "epoch_20"]
         for name in checkpoint_names:
-            for param in model.parameters():
-                param.data = torch.randn_like(param.data)
-            torch.save(model.state_dict(), os.path.join(weights_dir, f"{name}.pt"))
+            temp_model = ResNet18(input_shape=input_shape, num_classes=NUM_CLASSES, device=DEVICE)
+            temp_model.eval()
+            torch.save(temp_model.state_dict(), os.path.join(weights_dir, f"{name}.pt"))
 
         # Create dummy dataset (10 samples)
         data = [(torch.randn(input_shape, device=DEVICE), i) for i in range(10)]
