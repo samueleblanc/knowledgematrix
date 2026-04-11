@@ -28,6 +28,7 @@ class NN(nn.Module):
         self.layers = nn.ModuleList()
         self.residuals: Dict[int, Tuple[int, list[nn.Module]]] = {}
         self.residuals_starts: set[int] = set()
+        self.residual_modules = nn.ModuleList()
 
 
     ### Linear Layers ###
@@ -324,6 +325,9 @@ class NN(nn.Module):
                     raise ValueError(f"The lenghts of shape at layer {start} and {end} need to be equal to have a residual connection. Got {shape_start} and {shape_end}.")
         else:
             raise ValueError(f"To have a residual connection from layer {start} to {end}, one needs {start} < {end}.")
+        for module in projection:
+            if not isinstance(module, nn.Identity):
+                self.residual_modules.append(module)
         self.residuals_starts.add(start)
         if end in self.residuals:
                 self.residuals[end].append((start, projection))
