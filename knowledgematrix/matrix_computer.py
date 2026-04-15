@@ -3,7 +3,7 @@ from torch import nn
 from typing import Union
 from torch.nn import functional as F
 
-from knowledgematrix.neural_net import NN, MultiHeadAttention
+from knowledgematrix.neural_net import NN, MultiHeadAttention, RMSNorm
 
 
 class KnowledgeMatrixComputer:
@@ -92,7 +92,7 @@ class KnowledgeMatrixComputer:
                         inputs_residuals[i] = B
                     if i in self.model.residuals:
                         B = self.model.apply_residual(B, inputs_residuals, layer=i, affine=False)
-                    if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
+                    if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                         # Get activation ratios
                         pre_act = self.model.pre_acts[i]
                         post_act = self.model.acts[i]
@@ -117,6 +117,8 @@ class KnowledgeMatrixComputer:
                         B = B * (layer.weight/torch.sqrt(layer.running_var+layer.eps)).view(1,-1,1,1)
                     elif isinstance(layer, nn.LayerNorm):
                         B = B * layer.weight/torch.sqrt(self.model.layernorms[i][1]+layer.eps)
+                    elif isinstance(layer, RMSNorm):
+                        B = B * layer.weight / self.model.layernorms[i]
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(current_batch_size, device=self.device).view(-1,1,1,1)
@@ -139,7 +141,7 @@ class KnowledgeMatrixComputer:
                         inputs_residuals[i] = a
                     if i in self.model.residuals:
                         a = self.model.apply_residual(a, inputs_residuals, layer=i)
-                    if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
+                    if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                         pre_act = self.model.pre_acts[i]
                         post_act = self.model.acts[i]
                         vertices = post_act / pre_act
@@ -153,6 +155,8 @@ class KnowledgeMatrixComputer:
                         a = layer(a)
                     elif isinstance(layer, nn.LayerNorm):
                         a = ((a - self.model.layernorms[i][0])/torch.sqrt(self.model.layernorms[i][1]+layer.eps))*layer.weight + layer.bias
+                    elif isinstance(layer, RMSNorm):
+                        a = a * layer.weight / self.model.layernorms[i]
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(pool.shape[0], device=self.device).view(-1,1,1,1)
