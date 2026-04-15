@@ -109,7 +109,7 @@ class KnowledgeMatrixComputer:
                     elif isinstance(layer, nn.ConvTranspose2d):
                         B = F.conv_transpose2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding,
                                                output_padding=layer.output_padding, dilation=layer.dilation, groups=layer.groups)
-                    elif isinstance(layer, (nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Flatten)):
+                    elif isinstance(layer, (nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Flatten, nn.Upsample, nn.PixelShuffle)):
                         B = layer(B)
                     elif isinstance(layer, nn.Linear):
                         B = (layer.weight @ B.transpose(-1,-2)).transpose(-1,-2)
@@ -119,6 +119,9 @@ class KnowledgeMatrixComputer:
                         B = B * layer.weight/torch.sqrt(self.model.layernorms[i][1]+layer.eps)
                     elif isinstance(layer, RMSNorm):
                         B = B * layer.weight / self.model.layernorms[i]
+                    elif isinstance(layer, nn.GroupNorm):
+                        var_expanded = self.model.layernorms[i][1]
+                        B = B * (layer.weight.view(1, -1, 1, 1) / torch.sqrt(var_expanded + layer.eps))
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(current_batch_size, device=self.device).view(-1,1,1,1)
@@ -132,7 +135,7 @@ class KnowledgeMatrixComputer:
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
-            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or len(self.model.residuals) > 0:
+            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or self.model._has_groupnorm() or len(self.model.residuals) > 0:
                 a = torch.zeros(x.shape, device=self.device, dtype=dtype)
                 if len(x.shape) == 3:
                     a = a.unsqueeze(0)
@@ -151,12 +154,16 @@ class KnowledgeMatrixComputer:
                             vertices
                         )
                         a = a * vertices
-                    elif isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear)):
+                    elif isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear, nn.Upsample, nn.PixelShuffle)):
                         a = layer(a)
                     elif isinstance(layer, nn.LayerNorm):
                         a = ((a - self.model.layernorms[i][0])/torch.sqrt(self.model.layernorms[i][1]+layer.eps))*layer.weight + layer.bias
                     elif isinstance(layer, RMSNorm):
                         a = a * layer.weight / self.model.layernorms[i]
+                    elif isinstance(layer, nn.GroupNorm):
+                        mean_expanded = self.model.layernorms[i][0]
+                        var_expanded = self.model.layernorms[i][1]
+                        a = ((a - mean_expanded) / torch.sqrt(var_expanded + layer.eps)) * layer.weight.view(1, -1, 1, 1) + layer.bias.view(1, -1, 1, 1)
                     elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                         pool = self.model.maxpool_indices[i]
                         batch_indices = torch.arange(pool.shape[0], device=self.device).view(-1,1,1,1)

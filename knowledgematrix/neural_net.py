@@ -205,6 +205,33 @@ class NN(nn.Module):
     def rmsnorm(self, normalized_shape: int, eps: float = 1e-6) -> None:
         self.layers.append(RMSNorm(normalized_shape=normalized_shape, eps=eps))
 
+    def groupnorm(
+            self,
+            num_groups: int,
+            num_channels: int,
+            eps: float = 1e-5,
+            affine: bool = True
+    ) -> None:
+        self.layers.append(nn.GroupNorm(
+            num_groups=num_groups,
+            num_channels=num_channels,
+            eps=eps,
+            affine=affine
+        ))
+
+    def instancenorm(
+            self,
+            num_channels: int,
+            eps: float = 1e-5,
+            affine: bool = True
+    ) -> None:
+        self.layers.append(nn.GroupNorm(
+            num_groups=num_channels,
+            num_channels=num_channels,
+            eps=eps,
+            affine=affine
+        ))
+
 
     ### Pooling Layers ###
 
@@ -289,6 +316,22 @@ class NN(nn.Module):
             output_size: int
     ) -> None:
         self.layers.append(nn.AdaptiveMaxPool2d(output_size=(output_size,1), return_indices=True))
+
+
+    ### Upsampling Layers ###
+
+    def upsample(
+            self,
+            scale_factor: Union[int, float, Tuple[int]],
+            mode: str = 'nearest'
+    ) -> None:
+        kwargs = {'scale_factor': scale_factor, 'mode': mode}
+        if mode in ('bilinear', 'bicubic', 'trilinear'):
+            kwargs['align_corners'] = False
+        self.layers.append(nn.Upsample(**kwargs))
+
+    def pixel_shuffle(self, upscale_factor: int) -> None:
+        self.layers.append(nn.PixelShuffle(upscale_factor=upscale_factor))
 
 
     ### Dropout ###
@@ -444,7 +487,7 @@ class NN(nn.Module):
                     inputs_residuals[i] = x
                 if i in self.residuals: 
                     x = self.apply_residual(x, inputs_residuals, layer=i)
-                if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
+                if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten, nn.Upsample, nn.PixelShuffle)):
                     x = layer(x)
                 elif isinstance(layer, nn.LayerNorm):
                     dims = tuple(range(-len(layer.normalized_shape), 0))
@@ -452,6 +495,17 @@ class NN(nn.Module):
                     x = layer(x)
                 elif isinstance(layer, RMSNorm):
                     self.layernorms[i] = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + layer.eps)
+                    x = layer(x)
+                elif isinstance(layer, nn.GroupNorm):
+                    G = layer.num_groups
+                    N, C, H, W = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+                    cpg = C // G
+                    x_grouped = x.reshape(N, G, cpg, H, W)
+                    mean = x_grouped.mean(dim=[2, 3, 4], keepdim=True)
+                    var = x_grouped.var(dim=[2, 3, 4], unbiased=False, keepdim=True)
+                    mean_expanded = mean.expand(-1, -1, cpg, -1, -1).reshape(N, C, 1, 1)
+                    var_expanded = var.expand(-1, -1, cpg, -1, -1).reshape(N, C, 1, 1)
+                    self.layernorms[i] = (mean_expanded, var_expanded)
                     x = layer(x)
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
@@ -499,7 +553,7 @@ class NN(nn.Module):
 
     def get_matrix_shape(self) -> Tuple[int]:
         # Returns the shape of the knowledge matrix in the format: (rows, columns).
-        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm()))
+        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm() or self._has_groupnorm()))
     
     def _has_bias(self) -> bool:
         for layer in self.layers:
@@ -519,6 +573,12 @@ class NN(nn.Module):
     def _has_layernorm(self) -> bool:
         for layer in self.layers:
             if isinstance(layer, nn.LayerNorm):
+                return True
+        return False
+
+    def _has_groupnorm(self) -> bool:
+        for layer in self.layers:
+            if isinstance(layer, nn.GroupNorm):
                 return True
         return False
 
