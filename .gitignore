@@ -1,4 +1,5 @@
 knowledgematrix.egg-info/
 __pycache__/
 build/
-PR-*.md
+*.md
+!README.md
