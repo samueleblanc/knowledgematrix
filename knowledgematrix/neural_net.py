@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -28,6 +30,7 @@ class NN(nn.Module):
         self.layers = nn.ModuleList()
         self.residuals: Dict[int, Tuple[int, list[nn.Module]]] = {}
         self.residuals_starts: set[int] = set()
+        self.residual_modules = nn.ModuleList()
 
 
     ### Linear Layers ###
@@ -344,6 +347,12 @@ class NN(nn.Module):
     def softplus(self, beta: float = 1.0, threshold: float = 20.0) -> None:
         self.layers.append(nn.Softplus(beta=beta, threshold=threshold))
 
+    def jumprelu(self, threshold: torch.Tensor) -> None:
+        self.layers.append(JumpReLU(threshold=threshold))
+
+    def topk_activation(self, k: int) -> None:
+        self.layers.append(TopKActivation(k=k))
+
     def multiheadattention(
             self, 
             d_model: int, 
@@ -401,6 +410,9 @@ class NN(nn.Module):
                     raise ValueError(f"The lenghts of shape at layer {start} and {end} need to be equal to have a residual connection. Got {shape_start} and {shape_end}.")
         else:
             raise ValueError(f"To have a residual connection from layer {start} to {end}, one needs {start} < {end}.")
+        for module in projection:
+            if not isinstance(module, nn.Identity):
+                self.residual_modules.append(module)
         self.residuals_starts.add(start)
         if end in self.residuals:
                 self.residuals[end].append((start, projection))
@@ -598,6 +610,33 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return x * self.weight / rms
+   
+
+class JumpReLU(nn.ReLU):
+    """
+        JumpReLU activation: z * 1[z > threshold], with per-feature thresholds.
+    """
+    def __init__(self, threshold: torch.Tensor):
+        super().__init__()
+        self.register_buffer("threshold", threshold)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * (x > self.threshold).float()
+
+
+class TopKActivation(nn.ReLU):
+    """
+        TopK activation: keeps only the top-k activations, zeros the rest.
+    """
+    def __init__(self, k: int):
+        super().__init__()
+        self.k = k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        topk_vals, topk_idx = torch.topk(x, self.k, dim=-1)
+        result = torch.zeros_like(x)
+        result.scatter_(-1, topk_idx, topk_vals)
+        return result
 
 
 class PositionalEncoding(nn.Module):
