@@ -48,38 +48,94 @@ class NN(nn.Module):
         ))
     
     def conv(
-            self, 
-            in_channels: int, 
-            out_channels: int, 
-            kernel_size: Tuple[int], 
-            stride: Tuple[int]=(1,1), 
-            padding: Tuple[int]=(0,0), 
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: Tuple[int],
+            stride: Tuple[int]=(1,1),
+            padding: Tuple[int]=(0,0),
+            dilation: Tuple[int]=(1,1),
+            groups: int=1,
             bias: bool=True
         ) -> None:
         self.layers.append(nn.Conv2d(
-            in_channels=in_channels, 
-            out_channels=out_channels, 
-            kernel_size=kernel_size, 
-            stride=stride, 
-            padding=padding, 
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
             bias=bias
         ))
     
     def conv1d(
-            self, 
-            in_channels: int, 
-            out_channels: int, 
-            kernel_size: int, 
-            stride: int=1, 
-            padding: int=0, 
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: int,
+            stride: int=1,
+            padding: int=0,
+            dilation: int=1,
+            groups: int=1,
             bias: bool=True
         ) -> None:
         self.layers.append(nn.Conv2d(
-            in_channels=in_channels, 
-            out_channels=out_channels, 
-            kernel_size=(kernel_size,1), 
-            stride=(stride,1), 
-            padding=(padding,0), 
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size,1),
+            stride=(stride,1),
+            padding=(padding,0),
+            dilation=(dilation,1),
+            groups=groups,
+            bias=bias
+        ))
+
+    def conv_transpose(
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: Tuple[int],
+            stride: Tuple[int]=(1,1),
+            padding: Tuple[int]=(0,0),
+            output_padding: Tuple[int]=(0,0),
+            dilation: Tuple[int]=(1,1),
+            groups: int=1,
+            bias: bool=True
+        ) -> None:
+        self.layers.append(nn.ConvTranspose2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            output_padding=output_padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias
+        ))
+
+    def conv_transpose1d(
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: int,
+            stride: int=1,
+            padding: int=0,
+            output_padding: int=0,
+            dilation: int=1,
+            groups: int=1,
+            bias: bool=True
+        ) -> None:
+        self.layers.append(nn.ConvTranspose2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size,1),
+            stride=(stride,1),
+            padding=(padding,0),
+            output_padding=(output_padding,0),
+            dilation=(dilation,1),
+            groups=groups,
             bias=bias
         ))
     
@@ -379,7 +435,7 @@ class NN(nn.Module):
                     inputs_residuals[i] = x
                 if i in self.residuals: 
                     x = self.apply_residual(x, inputs_residuals, layer=i)
-                if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
+                if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten)):
                     x = layer(x)
                 elif isinstance(layer, nn.LayerNorm):
                     dims = tuple(range(-len(layer.normalized_shape), 0))

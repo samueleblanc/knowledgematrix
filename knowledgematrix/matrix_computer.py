@@ -104,7 +104,11 @@ class KnowledgeMatrixComputer:
                         ).squeeze(0)  # Remove original batch dim
                         B = B * vertices
                     elif isinstance(layer, nn.Conv2d):
-                        B = F.conv2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding)
+                        B = F.conv2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding,
+                                     dilation=layer.dilation, groups=layer.groups)
+                    elif isinstance(layer, nn.ConvTranspose2d):
+                        B = F.conv_transpose2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding,
+                                               output_padding=layer.output_padding, dilation=layer.dilation, groups=layer.groups)
                     elif isinstance(layer, (nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Flatten)):
                         B = layer(B)
                     elif isinstance(layer, nn.Linear):
@@ -145,7 +149,7 @@ class KnowledgeMatrixComputer:
                             vertices
                         )
                         a = a * vertices
-                    elif isinstance(layer, (nn.Conv2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear)):
+                    elif isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear)):
                         a = layer(a)
                     elif isinstance(layer, nn.LayerNorm):
                         a = ((a - self.model.layernorms[i][0])/torch.sqrt(self.model.layernorms[i][1]+layer.eps))*layer.weight + layer.bias
