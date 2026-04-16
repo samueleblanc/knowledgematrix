@@ -200,10 +200,13 @@ class NN(nn.Module):
     ) -> None:
         self.layers.append(nn.LayerNorm(
             normalized_shape=normalized_shape,
-            eps=eps, 
+            eps=eps,
             elementwise_affine=elementwise_affine,
             bias=bias
         ))
+
+    def rmsnorm(self, normalized_shape: int, eps: float = 1e-6) -> None:
+        self.layers.append(RMSNorm(normalized_shape=normalized_shape, eps=eps))
 
 
     ### Pooling Layers ###
@@ -326,6 +329,24 @@ class NN(nn.Module):
     def tanh(self) -> None:
         self.layers.append(nn.Tanh())
 
+    def celu(self, alpha: float = 1.0) -> None:
+        self.layers.append(nn.CELU(alpha=alpha))
+
+    def hardsigmoid(self) -> None:
+        self.layers.append(nn.Hardsigmoid())
+
+    def hardswish(self) -> None:
+        self.layers.append(nn.Hardswish())
+
+    def prelu(self, num_parameters: int = 1, init: float = 0.25) -> None:
+        self.layers.append(nn.PReLU(num_parameters=num_parameters, init=init))
+
+    def relu6(self) -> None:
+        self.layers.append(nn.ReLU6())
+
+    def softplus(self, beta: float = 1.0, threshold: float = 20.0) -> None:
+        self.layers.append(nn.Softplus(beta=beta, threshold=threshold))
+
     def jumprelu(self, threshold: torch.Tensor) -> None:
         self.layers.append(JumpReLU(threshold=threshold))
 
@@ -441,10 +462,13 @@ class NN(nn.Module):
                     dims = tuple(range(-len(layer.normalized_shape), 0))
                     self.layernorms[i] = (torch.mean(x, dim=dims, keepdim=True), torch.var(x, dim=dims, unbiased=False, keepdim=True))
                     x = layer(x)
+                elif isinstance(layer, RMSNorm):
+                    self.layernorms[i] = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + layer.eps)
+                    x = layer(x)
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
                     self.maxpool_indices[i] = indices
-                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, MultiHeadAttention)):
+                elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                     self.pre_acts[i] = x.detach().clone()
                     x = layer(x)
                     self.acts[i] = x.detach().clone()
@@ -571,6 +595,22 @@ class NN(nn.Module):
                 start_layer = 2
         return start_layer
 
+
+class RMSNorm(nn.Module):
+    """
+        Root Mean Square Layer Normalization.
+        Used by LLaMA, Mistral, Gemma, Qwen, and most post-2023 LLMs.
+    """
+    def __init__(self, normalized_shape: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.eps = eps
+        self.normalized_shape = (normalized_shape,)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return x * self.weight / rms
+   
 
 class JumpReLU(nn.ReLU):
     """

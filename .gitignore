@@ -1,5 +1,7 @@
 knowledgematrix.egg-info/
 __pycache__/
 build/
+*.md
+!README.md
 autoencoder literature/
 auto-enc.md
