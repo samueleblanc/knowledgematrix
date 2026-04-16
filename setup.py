@@ -13,6 +13,9 @@ setup(
         "torch>=2.0",
         "torchvision>=0.15"
     ],
+    extras_require={
+        "viz": ["matplotlib>=3.5"],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
