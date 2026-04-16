@@ -7,29 +7,6 @@ import math
 from typing import Union, Dict, Tuple
 
 
-class JumpReLU(nn.ReLU):
-    """JumpReLU activation: z * 1[z > threshold], with per-feature thresholds."""
-    def __init__(self, threshold: torch.Tensor):
-        super().__init__()
-        self.register_buffer("threshold", threshold)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * (x > self.threshold).float()
-
-
-class TopKActivation(nn.ReLU):
-    """TopK activation: keeps only the top-k activations, zeros the rest."""
-    def __init__(self, k: int):
-        super().__init__()
-        self.k = k
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        topk_vals, topk_idx = torch.topk(x, self.k, dim=-1)
-        result = torch.zeros_like(x)
-        result.scatter_(-1, topk_idx, topk_vals)
-        return result
-
-
 class NN(nn.Module):
     """
         A class to build a neural network for which the knowledge matrix can be computed.
@@ -533,6 +510,33 @@ class NN(nn.Module):
             if isinstance(self.layers[1], PositionalEncoding):
                 start_layer = 2
         return start_layer
+
+
+class JumpReLU(nn.ReLU):
+    """
+        JumpReLU activation: z * 1[z > threshold], with per-feature thresholds.
+    """
+    def __init__(self, threshold: torch.Tensor):
+        super().__init__()
+        self.register_buffer("threshold", threshold)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * (x > self.threshold).float()
+
+
+class TopKActivation(nn.ReLU):
+    """
+        TopK activation: keeps only the top-k activations, zeros the rest.
+    """
+    def __init__(self, k: int):
+        super().__init__()
+        self.k = k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        topk_vals, topk_idx = torch.topk(x, self.k, dim=-1)
+        result = torch.zeros_like(x)
+        result.scatter_(-1, topk_idx, topk_vals)
+        return result
 
 
 class PositionalEncoding(nn.Module):
