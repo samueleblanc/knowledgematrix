@@ -743,23 +743,33 @@ class MultiHeadAttention(nn.Module):
         which is inspired by the Attention is All You Need paper.
     """
     def __init__(
-            self, 
-            d_model: int, 
+            self,
+            d_model: int,
             num_heads: int,
-            mask: Union[torch.Tensor,None]=None
+            num_kv_heads: Union[int, None]=None,
+            mask: Union[torch.Tensor, None]=None
         ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads.")
 
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        if num_kv_heads <= 0:
+            raise ValueError("num_kv_heads must be positive.")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads.")
+
         self.d_model = d_model
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         self.d_head = d_model // num_heads
+        self.kv_repeat = num_heads // num_kv_heads
         self.mask = mask
 
         self.Q = nn.Linear(d_model, d_model)
-        self.K = nn.Linear(d_model, d_model)
-        self.V = nn.Linear(d_model, d_model)
+        self.K = nn.Linear(d_model, num_kv_heads * self.d_head)
+        self.V = nn.Linear(d_model, num_kv_heads * self.d_head)
         self.O = nn.Linear(d_model, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -770,8 +780,12 @@ class MultiHeadAttention(nn.Module):
         V = self.V(x)
 
         Q = Q.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
-        K = K.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
-        V = V.view(batch, B, T, self.num_heads, self.d_head).transpose(2, 3)
+        K = K.view(batch, B, T, self.num_kv_heads, self.d_head).transpose(2, 3)
+        V = V.view(batch, B, T, self.num_kv_heads, self.d_head).transpose(2, 3)
+
+        if self.kv_repeat > 1:
+            K = K.repeat_interleave(self.kv_repeat, dim=-3)
+            V = V.repeat_interleave(self.kv_repeat, dim=-3)
 
         scores = Q @ K.transpose(-2, -1) / math.sqrt(self.d_head)
 
