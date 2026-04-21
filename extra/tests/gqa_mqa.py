@@ -75,5 +75,15 @@ class TestMHABackwardCompat(unittest.TestCase):
         self.assertTrue(torch.allclose(out_default, out_explicit, atol=1e-10))
 
 
+class TestMHAValidation(unittest.TestCase):
+    def test_num_heads_not_divisible_by_num_kv_heads_raises(self):
+        with self.assertRaises(ValueError):
+            MultiHeadAttention(d_model=64, num_heads=8, num_kv_heads=3)
+
+    def test_non_positive_num_kv_heads_raises(self):
+        with self.assertRaises(ValueError):
+            MultiHeadAttention(d_model=64, num_heads=8, num_kv_heads=0)
+
+
 if __name__ == "__main__":
     unittest.main()
