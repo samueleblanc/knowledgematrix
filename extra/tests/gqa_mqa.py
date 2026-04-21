@@ -165,6 +165,42 @@ class TestGQAKnowledgeMatrixInvariant(unittest.TestCase):
         )
         gc.collect()
 
+    def test_mqa_kv_invariant(self):
+        torch.manual_seed(1)
+        random.seed(1)
+        vocab_size = 40
+        num_heads = 8
+        num_kv_heads = 1
+        d_head = 4
+        d_model = num_heads * d_head
+        seq_len = 10
+
+        model = GQAMiniTransformer(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            seq_len=seq_len,
+        ).to(DEVICE)
+        model.eval()
+
+        x = torch.randint(0, vocab_size, (1, 1, seq_len))
+        forward_pass = model(x)
+        model.save = True
+
+        computer = KnowledgeMatrixComputer(model, batch_size=8)
+        mat = computer.forward(x)
+        diff = torch.norm(forward_pass.reshape(1, -1) - mat.sum(1)).item()
+
+        self.assertAlmostEqual(
+            first=diff,
+            second=0,
+            places=None,
+            msg=f"mat.sum(1) and forward_pass differ by {diff}.",
+            delta=0.1,
+        )
+        gc.collect()
+
 
 if __name__ == "__main__":
     unittest.main()
