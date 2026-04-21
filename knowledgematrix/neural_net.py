@@ -397,15 +397,17 @@ class NN(nn.Module):
         self.layers.append(TopKActivation(k=k))
 
     def multiheadattention(
-            self, 
-            d_model: int, 
-            num_heads: int, 
+            self,
+            d_model: int,
+            num_heads: int,
+            num_kv_heads: Union[int,None]=None,
             mask: Union[torch.Tensor,None]=None
         ) -> None:
         self.layers.append(
             MultiHeadAttention(
-                d_model=d_model, 
-                num_heads=num_heads, 
+                d_model=d_model,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 mask=mask
             )
         )

@@ -85,5 +85,27 @@ class TestMHAValidation(unittest.TestCase):
             MultiHeadAttention(d_model=64, num_heads=8, num_kv_heads=0)
 
 
+class TestMultiheadattentionBuilder(unittest.TestCase):
+    def test_builder_passes_num_kv_heads(self):
+        from knowledgematrix.neural_net import NN
+
+        net = NN(input_shape=(1, 1, 32))
+        net.multiheadattention(d_model=32, num_heads=8, num_kv_heads=2)
+
+        layer = net.layers[-1]
+        self.assertIsInstance(layer, MultiHeadAttention)
+        self.assertEqual(layer.num_heads, 8)
+        self.assertEqual(layer.num_kv_heads, 2)
+
+    def test_builder_defaults_num_kv_heads_to_num_heads(self):
+        from knowledgematrix.neural_net import NN
+
+        net = NN(input_shape=(1, 1, 32))
+        net.multiheadattention(d_model=32, num_heads=4)
+
+        layer = net.layers[-1]
+        self.assertEqual(layer.num_kv_heads, 4)
+
+
 if __name__ == "__main__":
     unittest.main()
