@@ -32,13 +32,23 @@ class KnowledgeMatrixComputer:
         # Saves the output of the NN on the current sample in the forward method
         self.current_output: Union[NN, None] = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, extract_weff: bool = False) -> torch.Tensor:
         """
             Computes the knowledge matrix of a NN at a given input point.
             Args:
                 x (torch.Tensor): The input to the NN
+                extract_weff (bool): If True, return W_eff[j, i] = df[j]/dx_i
+                    (the local linearization slope) of shape
+                    (output_size, input_size). If False (default), return the
+                    standard knowledge matrix A with A[j, i] = W_eff[j, i] * x_i
+                    and an appended bias column of shape
+                    (output_size, input_size + 1). W_eff is exact only within
+                    the activation region of x (ReLU-family sign patterns and
+                    MaxPool argmax indices); re-extract after perturbations
+                    that cross region boundaries.
             Returns:
-                torch.Tensor: The knowledge matrix of the NN at the input point
+                torch.Tensor: The knowledge matrix A (default) or slope W_eff
+                    (extract_weff=True) of the NN at the input point.
         """
         with torch.no_grad():
             # Saves activations and pre-activations
@@ -82,7 +92,10 @@ class KnowledgeMatrixComputer:
 
                 # Create batched input for this chunk
                 batched_input = torch.zeros((current_batch_size,C,H,W), device=self.device, dtype=dtype)
-                batched_input[torch.arange(current_batch_size, device=self.device),c,h,w] = x.flatten()[start:end]
+                if extract_weff:
+                    batched_input[torch.arange(current_batch_size, device=self.device),c,h,w] = 1.0
+                else:
+                    batched_input[torch.arange(current_batch_size, device=self.device),c,h,w] = x.flatten()[start:end]
 
                 B = batched_input
                 for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
@@ -132,6 +145,9 @@ class KnowledgeMatrixComputer:
 
                 B = B.reshape(-1, output_size)
                 A[:, start:end] = B.T
+
+            if extract_weff:
+                return A
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
