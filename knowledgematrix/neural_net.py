@@ -38,6 +38,15 @@ class NN(nn.Module):
         #   forward() snapshots x at the right moment.
         self.concat_skips: Dict[int, list[int]] = {}
         self.concat_skips_starts: set[int] = set()
+        # Branch-input wiring (used by Inception): at layer `end`, REPLACE x
+        # with the snapshot captured at layer `start` (i.e. discard whatever
+        # value flowed through the previous branch). This linearizes the
+        # parallel branches of an Inception module: branch 1 runs naturally,
+        # branch_input restores x to the module's fork-point at the start of
+        # branch 2, 3, ..., and the eventual concat at the merge layer is
+        # handled by concat_skip.
+        self.branch_inputs: Dict[int, int] = {}
+        self.branch_inputs_starts: set[int] = set()
 
 
     ### Linear Layers ###
@@ -490,6 +499,24 @@ class NN(nn.Module):
         sources = [outputs[s] for s in self.concat_skips[layer]]
         return torch.cat(sources + [x], dim=1)
 
+    def branch_input(self, start: int, end: int) -> None:
+        """
+            Register a branch-input wiring: at layer `end`, REPLACE x with
+            the tensor captured at layer `start`. Used to linearize the
+            parallel branches of an Inception module -- after branch k
+            finishes, branch k+1 starts from the fork-point snapshot rather
+            than from branch k's output. The current x at `end` is dropped
+            (its value is typically captured separately as branch k's output
+            via concat_skip's start-snapshot mechanism, since `end` will
+            usually be in concat_skips_starts too).
+        """
+        if start >= end:
+            raise ValueError(f"branch_input requires start < end, got start={start}, end={end}.")
+        if end in self.branch_inputs:
+            raise ValueError(f"branch_input destination {end} already set to {self.branch_inputs[end]}.")
+        self.branch_inputs_starts.add(start)
+        self.branch_inputs[end] = start
+
 
     ### Forward Method ###
 
@@ -502,15 +529,22 @@ class NN(nn.Module):
         # Update the input shape, useful when the input shape is not known beforehand (e.g. for transformers)
         self.input_shape = (x.shape[1], x.shape[2], x.shape[3])
         inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
+        # branch_snapshots holds POST-concat snapshots for branch_input sources;
+        # inputs_residuals holds PRE-concat snapshots for residual / concat_skip sources.
+        branch_snapshots: list[torch.Tensor] = [None] * self.get_num_layers()
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
             for i, layer in enumerate(layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts or i in self.concat_skips_starts:
                     inputs_residuals[i] = x
+                if i in self.branch_inputs:
+                    x = branch_snapshots[self.branch_inputs[i]]
                 if i in self.residuals:
                     x = self.apply_residual(x, inputs_residuals, layer=i)
                 if i in self.concat_skips:
                     x = self.apply_concat(x, inputs_residuals, layer=i)
+                if i in self.branch_inputs_starts:
+                    branch_snapshots[i] = x
                 if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, _ = layer(x)
                 else:
@@ -527,10 +561,14 @@ class NN(nn.Module):
             for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts or i in self.concat_skips_starts:
                     inputs_residuals[i] = x
+                if i in self.branch_inputs:
+                    x = branch_snapshots[self.branch_inputs[i]]
                 if i in self.residuals:
                     x = self.apply_residual(x, inputs_residuals, layer=i)
                 if i in self.concat_skips:
                     x = self.apply_concat(x, inputs_residuals, layer=i)
+                if i in self.branch_inputs_starts:
+                    branch_snapshots[i] = x
                 if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten, nn.Upsample, nn.PixelShuffle)):
                     x = layer(x)
                 elif isinstance(layer, nn.LayerNorm):
@@ -589,11 +627,16 @@ class NN(nn.Module):
         x = torch.randn(self.input_shape).unsqueeze(0)
         start_layer = self._get_start_layer()
         inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
+        branch_snapshots: list[torch.Tensor] = [None] * self.get_num_layers()
         for j, layer in enumerate(self.layers[start_layer:i], start=start_layer):
             if j in self.concat_skips_starts:
                 inputs_residuals[j] = x
+            if j in self.branch_inputs:
+                x = branch_snapshots[self.branch_inputs[j]]
             if j in self.concat_skips:
                 x = self.apply_concat(x, inputs_residuals, layer=j)
+            if j in self.branch_inputs_starts:
+                branch_snapshots[j] = x
             if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                 x, _ = layer(x)
             else:
