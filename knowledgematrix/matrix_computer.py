@@ -65,6 +65,7 @@ class KnowledgeMatrixComputer:
             x = x.to(self.device)
             _zero = torch.tensor(0.0, device=self.device, dtype=dtype)
             inputs_residuals = [None] * self.model.get_num_layers()
+            branch_snapshots = [None] * self.model.get_num_layers()
             A = torch.empty((output_size, total_positions), device=self.device, dtype=dtype)
 
             for batch in range(num_batches):
@@ -88,10 +89,16 @@ class KnowledgeMatrixComputer:
                 for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                     # Process each layer type (Conv2d, AvgPool2d, Linear, BatchNorm2d, MaxPool2d, etc.)
                     # applying the appropriate transformations and handling activation ratios
-                    if i in self.model.residuals_starts:
+                    if i in self.model.residuals_starts or i in self.model.concat_skips_starts:
                         inputs_residuals[i] = B
+                    if i in self.model.branch_inputs:
+                        B = branch_snapshots[self.model.branch_inputs[i]]
                     if i in self.model.residuals:
                         B = self.model.apply_residual(B, inputs_residuals, layer=i, affine=False)
+                    if i in self.model.concat_skips:
+                        B = self.model.apply_concat(B, inputs_residuals, layer=i)
+                    if i in self.model.branch_inputs_starts:
+                        branch_snapshots[i] = B
                     if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                         # Get activation ratios
                         pre_act = self.model.pre_acts[i]
@@ -139,11 +146,19 @@ class KnowledgeMatrixComputer:
                 a = torch.zeros(x.shape, device=self.device, dtype=dtype)
                 if len(x.shape) == 3:
                     a = a.unsqueeze(0)
+                inputs_residuals = [None] * self.model.get_num_layers()
+                branch_snapshots = [None] * self.model.get_num_layers()
                 for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
-                    if i in self.model.residuals_starts:
+                    if i in self.model.residuals_starts or i in self.model.concat_skips_starts:
                         inputs_residuals[i] = a
+                    if i in self.model.branch_inputs:
+                        a = branch_snapshots[self.model.branch_inputs[i]]
                     if i in self.model.residuals:
                         a = self.model.apply_residual(a, inputs_residuals, layer=i)
+                    if i in self.model.concat_skips:
+                        a = self.model.apply_concat(a, inputs_residuals, layer=i)
+                    if i in self.model.branch_inputs_starts:
+                        branch_snapshots[i] = a
                     if isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                         pre_act = self.model.pre_acts[i]
                         post_act = self.model.acts[i]
