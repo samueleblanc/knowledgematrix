@@ -31,6 +31,13 @@ class NN(nn.Module):
         self.residuals: Dict[int, Tuple[int, list[nn.Module]]] = {}
         self.residuals_starts: set[int] = set()
         self.residual_modules = nn.ModuleList()
+        # Concatenation skip connections (used by DenseNet, U-Net):
+        #   concat_skips[end] -> ordered list of source layer indices whose
+        #   captured tensors are concatenated (along channel dim) BEFORE x at
+        #   layer `end`. concat_skips_starts holds every source index so
+        #   forward() snapshots x at the right moment.
+        self.concat_skips: Dict[int, list[int]] = {}
+        self.concat_skips_starts: set[int] = set()
 
 
     ### Linear Layers ###
@@ -464,6 +471,27 @@ class NN(nn.Module):
         else:
             self.residuals[end] = [(start, projection)]
 
+    def concat_skip(self, start: int, end: int) -> None:
+        """
+            Register a channel-wise concatenation skip: the tensor captured
+            at `start` is concatenated with the tensor arriving at `end`
+            along dim=1 (channels), in call order with the current x last.
+            Sources must share spatial dims with x at `end`. No projection
+            is applied -- the user is responsible for sizing downstream
+            layers to receive the grown channel dim.
+        """
+        if start >= end:
+            raise ValueError(f"concat_skip requires start < end, got start={start}, end={end}.")
+        self.concat_skips_starts.add(start)
+        if end in self.concat_skips:
+            self.concat_skips[end].append(start)
+        else:
+            self.concat_skips[end] = [start]
+
+    def apply_concat(self, x: torch.Tensor, outputs: list[torch.Tensor], layer: int) -> torch.Tensor:
+        sources = [outputs[s] for s in self.concat_skips[layer]]
+        return torch.cat(sources + [x], dim=1)
+
 
     ### Forward Method ###
 
@@ -479,10 +507,12 @@ class NN(nn.Module):
         if not self.save:  # Regular forward pass
             layers = self.layers[:-1] if return_penultimate else self.layers
             for i, layer in enumerate(layers[start_layer:], start=start_layer):
-                if i in self.residuals_starts:
+                if i in self.residuals_starts or i in self.concat_skips_starts:
                     inputs_residuals[i] = x
-                if i in self.residuals: 
+                if i in self.residuals:
                     x = self.apply_residual(x, inputs_residuals, layer=i)
+                if i in self.concat_skips:
+                    x = self.apply_concat(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, _ = layer(x)
                 else:
@@ -497,10 +527,12 @@ class NN(nn.Module):
             self.layernorms: list[torch.Tensor] = [None] * self.get_num_layers()
 
             for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
-                if i in self.residuals_starts:
+                if i in self.residuals_starts or i in self.concat_skips_starts:
                     inputs_residuals[i] = x
-                if i in self.residuals: 
+                if i in self.residuals:
                     x = self.apply_residual(x, inputs_residuals, layer=i)
+                if i in self.concat_skips:
+                    x = self.apply_concat(x, inputs_residuals, layer=i)
                 if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Linear, nn.Flatten, nn.Upsample, nn.PixelShuffle)):
                     x = layer(x)
                 elif isinstance(layer, nn.LayerNorm):
@@ -558,7 +590,12 @@ class NN(nn.Module):
     def shape_at_layer(self, i: int) -> torch.Size:
         x = torch.randn(self.input_shape).unsqueeze(0)
         start_layer = self._get_start_layer()
-        for layer in self.layers[start_layer:i]:
+        inputs_residuals: list[torch.Tensor] = [None] * self.get_num_layers()
+        for j, layer in enumerate(self.layers[start_layer:i], start=start_layer):
+            if j in self.concat_skips_starts:
+                inputs_residuals[j] = x
+            if j in self.concat_skips:
+                x = self.apply_concat(x, inputs_residuals, layer=j)
             if isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                 x, _ = layer(x)
             else:
