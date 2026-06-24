@@ -140,5 +140,17 @@ class TestFullMatrix(unittest.TestCase):
                             f"{name}: full-matrix mismatch, diff={diff}")
 
 
+class TestBackends(unittest.TestCase):
+    def test_backend_parity(self):
+        for name, builder in [("CNN", build_cnn), ("MLP", build_mlp), ("BN", build_cnn_bn)]:
+            model, x = builder()
+            A_func = GradientMatrixComputer(model, backend="func").forward(x)
+            A_auto = GradientMatrixComputer(model, batch_size=3, backend="autograd").forward(x)
+            diff = torch.norm(A_func - A_auto).item()
+            print(f"[backend_parity] {name}: ||A_func - A_autograd|| = {diff:.3e}")
+            self.assertTrue(torch.allclose(A_func, A_auto, atol=1e-8),
+                            f"{name}: backend mismatch, diff={diff}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

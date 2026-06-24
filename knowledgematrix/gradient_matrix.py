@@ -149,3 +149,18 @@ class GradientMatrixComputer:
             return self.model.forward(x_flat.reshape(self.input_shape)).flatten()
 
         return jacrev(f)(x.flatten())
+
+    def _jacobian_autograd(self, x: torch.Tensor) -> torch.Tensor:
+        x_leaf = x.flatten().clone().requires_grad_(True)
+        out = self.model.forward(x_leaf.reshape(self.input_shape)).flatten()
+        n_out, n_in = out.numel(), x_leaf.numel()
+        J = torch.empty((n_out, n_in), device=self.device, dtype=out.dtype)
+        eye = torch.eye(n_out, device=self.device, dtype=out.dtype)
+        for start in range(0, n_out, self.batch_size):
+            end = min(start + self.batch_size, n_out)
+            grad = torch.autograd.grad(
+                out, x_leaf, grad_outputs=eye[start:end],
+                retain_graph=True, is_grads_batched=True
+            )[0]
+            J[start:end] = grad
+        return J
