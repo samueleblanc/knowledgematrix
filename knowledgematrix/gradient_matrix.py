@@ -90,7 +90,48 @@ class GradientMatrixComputer:
         self.current_output = self._forward_output(x)
         if extract_weff:
             return J
-        raise NotImplementedError  # bias column added in Task 3
+        grad_x_input = J * x.flatten().unsqueeze(0)
+        bias = self._bias_column(x)
+        return torch.cat((grad_x_input, bias.unsqueeze(1)), dim=1)
+
+    def _bias_tangents(self) -> dict:
+        """
+            Maps each additive-bias parameter NAME to its effective bias tangent:
+            the raw .bias for Linear/Conv, and (beta - gamma*mu/sqrt(var+eps)) for
+            BatchNorm2d in eval mode (the gamma/sigma slope is input-side, already
+            captured by the input Jacobian).
+        """
+        name_by_id = {id(p): name for name, p in self.model.named_parameters()}
+        tangents = {}
+        for module in self.model.modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d, nn.ConvTranspose2d)):
+                if module.bias is not None:
+                    tangents[name_by_id[id(module.bias)]] = module.bias.detach().clone()
+            elif isinstance(module, nn.BatchNorm2d):
+                if module.bias is not None:
+                    eff = module.bias - module.weight * module.running_mean / torch.sqrt(
+                        module.running_var + module.eps
+                    )
+                    tangents[name_by_id[id(module.bias)]] = eff.detach().clone()
+        return tangents
+
+    def _bias_column(self, x: torch.Tensor) -> torch.Tensor:
+        """
+            FullGrad bias column c_c = sum_b (df_c/db) * b_eff, computed as a single
+            forward-mode JVP in the effective-bias direction (independent of f(x)).
+        """
+        from torch.func import jvp, functional_call
+
+        params = dict(self.model.named_parameters())
+        tangents = {name: torch.zeros_like(p) for name, p in params.items()}
+        for name, t in self._bias_tangents().items():
+            tangents[name] = t
+
+        def f(p: dict) -> torch.Tensor:
+            return functional_call(self.model, p, (x.reshape(self.input_shape),)).flatten()
+
+        _, c = jvp(f, (params,), (tangents,))
+        return c
 
     def _forward_output(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():

@@ -52,6 +52,31 @@ def build_cnn(input_shape=(3, 8, 8), num_classes=5):
     return model, x
 
 
+class CNNWithBN(NN):
+    def __init__(self, input_shape, num_classes, save=False, device="cpu"):
+        super().__init__(input_shape, save, device)
+        self.conv(in_channels=input_shape[0], out_channels=8, kernel_size=3, stride=1, padding=1)
+        self.batchnorm(8)
+        self.relu()
+        self.adaptiveavgpool((1, 1))
+        self.flatten()
+        self.linear(in_features=8, out_features=num_classes)
+
+
+def build_cnn_bn(input_shape=(3, 8, 8), num_classes=5):
+    model = CNNWithBN(input_shape, num_classes).to(DEVICE)
+    for m in model.modules():
+        if isinstance(m, torch.nn.BatchNorm2d):
+            m.running_mean = torch.randn_like(m.running_mean)
+            m.running_var = torch.rand_like(m.running_var) + 0.5
+            with torch.no_grad():
+                m.weight.copy_(torch.randn_like(m.weight))
+                m.bias.copy_(torch.randn_like(m.bias))
+    model.eval()
+    x = torch.rand(input_shape)
+    return model, x
+
+
 class TestGuard(unittest.TestCase):
     def test_accepts_pl(self):
         model, _ = build_mlp()
@@ -88,6 +113,31 @@ class TestJacobian(unittest.TestCase):
             print(f"[weff_matches_reference] {name}: ||W_grad - W_ref|| = {diff:.3e}")
             self.assertTrue(torch.allclose(W_grad, ref, atol=1e-8),
                             f"{name}: Jacobian mismatch, diff={diff}")
+
+
+class TestFullMatrix(unittest.TestCase):
+    def test_km_invariant(self):
+        for name, builder in [("CNN", build_cnn), ("MLP", build_mlp), ("BN", build_cnn_bn)]:
+            model, x = builder()
+            gmc = GradientMatrixComputer(model)
+            mat = gmc.forward(x)
+            out = model.forward(x).flatten()
+            diff = torch.norm(out - mat.sum(1)).item()
+            print(f"[km_invariant] {name}: ||out - mat.sum(1)|| = {diff:.3e}")
+            self.assertTrue(torch.allclose(out, mat.sum(1), atol=1e-6),
+                            f"{name}: KM invariant failed, diff={diff}")
+
+    def test_matches_reference_full(self):
+        for name, builder in [("CNN", build_cnn), ("MLP", build_mlp), ("BN", build_cnn_bn)]:
+            model, x = builder()
+            mat_grad = GradientMatrixComputer(model).forward(x)
+            model.save = True
+            mat_ref = KnowledgeMatrixComputer(model, batch_size=8).forward(x)
+            self.assertEqual(mat_grad.shape, mat_ref.shape, f"{name}: shape mismatch")
+            diff = torch.norm(mat_grad - mat_ref).item()
+            print(f"[matches_reference_full] {name}: ||A_grad - A_ref|| = {diff:.3e}")
+            self.assertTrue(torch.allclose(mat_grad, mat_ref, atol=1e-8),
+                            f"{name}: full-matrix mismatch, diff={diff}")
 
 
 if __name__ == "__main__":
