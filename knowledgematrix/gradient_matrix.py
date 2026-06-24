@@ -62,3 +62,49 @@ class GradientMatrixComputer:
         self.input_shape = model.input_shape
         self.input_size = math.prod(model.input_shape)
         self.current_output: Union[torch.Tensor, None] = None
+
+    def forward(self, x: torch.Tensor, extract_weff: bool = False) -> torch.Tensor:
+        """
+            Computes the knowledge matrix at a given input point.
+
+            Args:
+                x (torch.Tensor): Input of shape model.input_shape (unbatched).
+                extract_weff (bool): If True, return the input Jacobian
+                    W_eff[c, i] = df_c/dx_i of shape (output_size, input_size).
+                    If False (default), return gradient x input with an appended
+                    bias column of shape (output_size, input_size + 1).
+            Returns:
+                torch.Tensor: The knowledge matrix (default) or W_eff.
+        """
+        # NN.eval()/train() set per-layer modes but do not flip the container's
+        # own `training` flag, so inspect the actual layers (the true source of
+        # BatchNorm/Dropout behaviour) rather than self.model.training.
+        if any(layer.training for layer in self.model.layers):
+            raise RuntimeError(
+                "Call model.eval() before computing the gradient knowledge matrix "
+                "(BatchNorm/Dropout must use eval-mode behaviour)."
+            )
+        self.model.to(self.device)
+        x = x.to(self.device).reshape(self.input_shape)
+        J = self._jacobian(x)
+        self.current_output = self._forward_output(x)
+        if extract_weff:
+            return J
+        raise NotImplementedError  # bias column added in Task 3
+
+    def _forward_output(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            return self.model.forward(x).flatten()
+
+    def _jacobian(self, x: torch.Tensor) -> torch.Tensor:
+        if self.backend == "func":
+            return self._jacobian_func(x)
+        return self._jacobian_autograd(x)
+
+    def _jacobian_func(self, x: torch.Tensor) -> torch.Tensor:
+        from torch.func import jacrev
+
+        def f(x_flat: torch.Tensor) -> torch.Tensor:
+            return self.model.forward(x_flat.reshape(self.input_shape)).flatten()
+
+        return jacrev(f)(x.flatten())
