@@ -1,6 +1,7 @@
 import math
 import torch
 from torch import nn
+from torch.func import jacrev, jvp, functional_call
 from typing import Union
 
 from knowledgematrix.neural_net import NN
@@ -120,8 +121,6 @@ class GradientMatrixComputer:
             FullGrad bias column c_c = sum_b (df_c/db) * b_eff, computed as a single
             forward-mode JVP in the effective-bias direction (independent of f(x)).
         """
-        from torch.func import jvp, functional_call
-
         params = dict(self.model.named_parameters())
         tangents = {name: torch.zeros_like(p) for name, p in params.items()}
         for name, t in self._bias_tangents().items():
@@ -143,14 +142,16 @@ class GradientMatrixComputer:
         return self._jacobian_autograd(x)
 
     def _jacobian_func(self, x: torch.Tensor) -> torch.Tensor:
-        from torch.func import jacrev
-
         def f(x_flat: torch.Tensor) -> torch.Tensor:
             return self.model.forward(x_flat.reshape(self.input_shape)).flatten()
 
         return jacrev(f)(x.flatten())
 
     def _jacobian_autograd(self, x: torch.Tensor) -> torch.Tensor:
+        """
+            Input Jacobian (C, d) via torch.autograd.grad, computed in chunks of
+            self.batch_size output classes (is_grads_batched) to bound memory.
+        """
         x_leaf = x.flatten().clone().requires_grad_(True)
         out = self.model.forward(x_leaf.reshape(self.input_shape)).flatten()
         n_out, n_in = out.numel(), x_leaf.numel()
