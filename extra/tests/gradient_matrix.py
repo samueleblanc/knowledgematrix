@@ -152,5 +152,31 @@ class TestBackends(unittest.TestCase):
                             f"{name}: backend mismatch, diff={diff}")
 
 
+class TestEdgeCases(unittest.TestCase):
+    def test_zero_pixel_finite(self):
+        model, x = build_cnn()
+        x[:, 0, 0] = 0.0
+        x[:, 3, 3] = 0.0
+        gmc = GradientMatrixComputer(model)
+        mat = gmc.forward(x)
+        self.assertTrue(torch.isfinite(mat).all(), "non-finite entries on zero pixels")
+        out = model.forward(x).flatten()
+        self.assertTrue(torch.allclose(out, mat.sum(1), atol=1e-6))
+
+    def test_output_shapes(self):
+        model, x = build_mlp()
+        gmc = GradientMatrixComputer(model)
+        d = 1 * 6 * 6
+        self.assertEqual(tuple(gmc.forward(x).shape), (4, d + 1))
+        self.assertEqual(tuple(gmc.forward(x, extract_weff=True).shape), (4, d))
+
+    def test_requires_eval(self):
+        model, x = build_mlp()
+        model.train()
+        gmc = GradientMatrixComputer(model)  # guard is structural, allowed in train
+        with self.assertRaises(RuntimeError):
+            gmc.forward(x)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
