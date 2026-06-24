@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import time
 import unittest
 import torch
 
@@ -176,6 +177,40 @@ class TestEdgeCases(unittest.TestCase):
         gmc = GradientMatrixComputer(model)  # guard is structural, allowed in train
         with self.assertRaises(RuntimeError):
             gmc.forward(x)
+
+
+class TestSpeed(unittest.TestCase):
+    def _time(self, fn, repeats=3):
+        fn()  # warmup
+        t0 = time.perf_counter()
+        for _ in range(repeats):
+            fn()
+        return (time.perf_counter() - t0) / repeats
+
+    def test_speed_comparison(self):
+        configs = [
+            ("MLP-28x28", build_mlp((1, 28, 28), 10)),
+            ("MLP-64x64", build_mlp((1, 64, 64), 10)),
+            ("CNN-3x16x16", build_cnn((3, 16, 16), 10)),
+        ]
+        print("\n--- KM speed comparison (per call, mean of 3) ---")
+        print(f"{'network':<14}{'d':>7}{'C':>5}{'KM (ms)':>12}{'grad (ms)':>12}{'speedup':>10}")
+        big_d_ok = False
+        for name, (model, x) in configs:
+            d = x.numel()
+            C = model.forward(x).numel()
+            km = KnowledgeMatrixComputer(model, batch_size=256)
+            gm = GradientMatrixComputer(model, backend="func")
+            t_km = self._time(lambda: km.forward(x))
+            t_gm = self._time(lambda: gm.forward(x))
+            # correctness sanity within the benchmark
+            self.assertTrue(torch.allclose(km.forward(x), gm.forward(x), atol=1e-8),
+                            f"{name}: outputs disagree")
+            speedup = t_km / t_gm
+            print(f"{name:<14}{d:>7}{C:>5}{t_km*1e3:>12.2f}{t_gm*1e3:>12.2f}{speedup:>9.1f}x")
+            if d >= 4096:
+                big_d_ok = t_gm < t_km
+        self.assertTrue(big_d_ok, "gradient method should beat KM on the large-d (64x64) net")
 
 
 if __name__ == "__main__":
