@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import copy
+import operator
+from collections import deque
+
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torch.fx as fx
 import math
-from typing import Union, Dict, Tuple
+from typing import Union, Dict, Tuple, List, Optional
 
 
 class NN(nn.Module):
@@ -520,6 +525,311 @@ class NN(nn.Module):
         self.branch_inputs[end] = start
 
 
+    ### Conversion from an arbitrary torch Module (MVP) ###
+
+    @classmethod
+    def from_torch(
+            cls,
+            module: nn.Module,
+            input_shape: Tuple[int, ...],
+            num_classes: Union[int, None] = None,
+            device: str = "cpu",
+        ) -> "NN":
+        """
+            Convert an in-scope pretrained torchvision ``nn.Module`` into an
+            ``NN`` whose ``forward`` exactly reproduces the source (so its
+            knowledge matrix can be computed).
+
+            MVP scope: pure-sequential nets (VGG, AlexNet) and post-activation
+            residual nets that merge via ``operator.add`` with a post-add
+            activation (ResNet-18/34/50/101/152). Anything else -- concat
+            (DenseNet), branch (Inception), SE/``mul`` gating, attention,
+            reshape/permute, linear-bottleneck/pre-activation residuals -- is
+            out of scope and raises ``NotImplementedError`` rather than
+            silently mis-wiring.
+
+            Pipeline: ``torch.fx.symbolic_trace`` -> classify each node
+            (LAYER / WIRING / DROP / UNMAPPABLE) -> emit into a fresh ``NN``,
+            resolving residual skip endpoints to integer layer indices via a
+            ``live_index`` map (first emitted-layer consumer of a tensor).
+
+            Args:
+                module: the source ``nn.Module`` (left untouched -- all
+                    parametric submodules are deep-copied).
+                input_shape: ``(C, H, W)`` shape of a single input sample.
+                num_classes: if given and the final ``Linear`` has a different
+                    ``out_features``, the head is replaced with a fresh
+                    ``Linear`` of this width (no pretrained weights).
+                device: device for the resulting ``NN``.
+        """
+        gm = fx.symbolic_trace(module)
+        nodes = list(gm.graph.nodes)
+
+        # ---- Pass 0: find residual-merge nodes and their skip/downsample paths.
+        merge_nodes: List[fx.Node] = [
+            n for n in nodes
+            if _ft_is_add(n) and len(_ft_tensor_inputs(n)) == 2
+        ]
+        merge_set = set(merge_nodes)
+        merge_info: Dict[fx.Node, Tuple[fx.Node, List[nn.Module]]] = {}
+        skip_node_set: set = set()
+        for m in merge_nodes:
+            a, b = _ft_tensor_inputs(m)
+            fork = _ft_fork(a, b)
+            if fork is None:
+                raise NotImplementedError(
+                    f"from_torch: cannot resolve a common fork for residual add "
+                    f"at node {m.name}."
+                )
+            da, db = _ft_dist(a, fork), _ft_dist(b, fork)
+            # main = the deeper branch; skip = the shallower (identity/downsample).
+            skip_arg = b if da >= db else a
+            skip_path = _ft_linear_path(skip_arg, fork, m)
+            skip_src: List[nn.Module] = []
+            for sn in skip_path:
+                if sn.op != "call_module":
+                    raise NotImplementedError(
+                        f"from_torch: residual skip path at node {m.name} contains a "
+                        f"non-module op {sn.op} ({sn.target}); out of MVP scope."
+                    )
+                sub = gm.get_submodule(sn.target)
+                if not isinstance(sub, (nn.Conv2d, nn.BatchNorm2d)):
+                    raise NotImplementedError(
+                        f"from_torch: unsupported downsample/projection module "
+                        f"{type(sub).__name__} at node {sn.name}; out of MVP scope."
+                    )
+                skip_src.append(sub)
+            merge_info[m] = (fork, skip_src)
+            skip_node_set.update(skip_path)
+
+        # ---- Pass 1: emit layers; build emit_index / live_index / passthrough.
+        self = cls(input_shape, save=False, device=device)
+        live_index: Dict[fx.Node, int] = {}
+        passthrough: Dict[fx.Node, fx.Node] = {}
+
+        def resolve(n: fx.Node) -> fx.Node:
+            seen = set()
+            while n in passthrough and n not in seen:
+                seen.add(n)
+                n = passthrough[n]
+            return n
+
+        for node in nodes:
+            if node.op in ("placeholder", "output"):
+                continue
+            if node in skip_node_set or node in merge_set:
+                # Skip/downsample modules and residual adds are handled as
+                # wiring in pass 2, not emitted on the main line.
+                continue
+            status = self._ft_emit(node, gm)
+            if status == "drop":
+                ins = _ft_tensor_inputs(node)
+                passthrough[node] = resolve(ins[0]) if ins else node
+                continue
+            # A layer was appended; record its index and its consumption of
+            # upstream tensors (first emitted consumer wins -> live_index).
+            idx = self.get_num_layers() - 1
+            for inp in _ft_tensor_inputs(node):
+                src = resolve(inp)
+                if src not in live_index:
+                    live_index[src] = idx
+
+        # ---- Pass 2: register residual wiring; guard the two hazards.
+        for m in merge_nodes:
+            fork, skip_src = merge_info[m]
+            fork_r = resolve(fork)
+            # Hazard 1: terminal add (no post-merge layer consumes it).
+            if m not in live_index:
+                raise NotImplementedError(
+                    f"from_torch: terminal residual add at node {m.name} (no "
+                    f"following layer); NN.forward would silently drop it."
+                )
+            end = live_index[m]
+            # Hazard 2: no-gap adjacent merge. The fork must resolve to an
+            # emitted-layer output (or the network input), never a raw merge
+            # output -- otherwise the fork snapshot captures the pre-add tensor.
+            if fork_r in merge_set:
+                raise NotImplementedError(
+                    f"from_torch: residual at node {m.name} forks from an "
+                    f"un-activated merge output (no post-merge activation between "
+                    f"adjacent residual blocks). Architectures such as "
+                    f"MobileNetV2/EfficientNet linear bottlenecks and "
+                    f"pre-activation ResNets are out of MVP scope."
+                )
+            if fork_r not in live_index:
+                raise NotImplementedError(
+                    f"from_torch: cannot resolve residual fork index for node "
+                    f"{m.name}."
+                )
+            start = live_index[fork_r]
+            if not (start < end) or end >= self.get_num_layers():
+                raise NotImplementedError(
+                    f"from_torch: invalid residual endpoints (start={start}, "
+                    f"end={end}) at node {m.name}."
+                )
+            self.residual(start, end)
+            # Keep auto-projection BNs in eval so later shape_at_layer calls
+            # don't corrupt their running stats.
+            for _, proj in self.residuals[end]:
+                for sub in proj:
+                    if isinstance(sub, nn.BatchNorm2d):
+                        sub.eval()
+            # Override the auto projection with the real downsample modules.
+            if skip_src:
+                new_proj = [copy.deepcopy(s) for s in skip_src]
+                for mod in new_proj:
+                    if isinstance(mod, nn.BatchNorm2d):
+                        mod.eval()
+                    self.residual_modules.append(mod)
+                overridden = False
+                lst = self.residuals[end]
+                for k, (s, _proj) in enumerate(lst):
+                    if s == start:
+                        lst[k] = (start, new_proj)
+                        overridden = True
+                        break
+                assert overridden, (
+                    f"from_torch: downsample projection override failed for node "
+                    f"{m.name} (start={start}, end={end})."
+                )
+
+        # ---- Optional classifier-head swap.
+        if num_classes is not None:
+            last = self.layers[-1]
+            if isinstance(last, nn.Linear) and last.out_features != num_classes:
+                self.layers[-1] = nn.Linear(last.in_features, num_classes)
+
+        self.to(device)
+        return self
+
+    def _ft_emit(self, node: fx.Node, gm: fx.GraphModule) -> str:
+        """
+            Emit one fx node into ``self.layers``. Returns "layer" if a layer
+            was appended, "drop" if the node is a no-op at eval (Dropout /
+            Identity). Raises ``NotImplementedError`` for anything unmappable.
+        """
+        if node.op == "call_module":
+            return self._ft_emit_module(gm.get_submodule(node.target), node)
+        if node.op in ("call_function", "call_method"):
+            return self._ft_emit_func(node)
+        raise NotImplementedError(
+            f"from_torch: unsupported node op {node.op} at node {node.name}."
+        )
+
+    def _ft_emit_module(self, sub: nn.Module, node: fx.Node) -> str:
+        # Drop no-ops (identity at eval).
+        if isinstance(sub, (nn.Dropout, nn.Dropout1d, nn.Dropout2d,
+                            nn.Dropout3d, nn.AlphaDropout, nn.Identity)):
+            return "drop"
+        # Parametric: deep-copy so weights/bias/BN stats transfer exactly and
+        # the caller's module is never mutated.
+        if isinstance(sub, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear,
+                            nn.LayerNorm, nn.GroupNorm)):
+            self.layers.append(copy.deepcopy(sub))
+            return "layer"
+        if isinstance(sub, nn.BatchNorm2d):
+            bn = copy.deepcopy(sub)
+            bn.eval()  # protect running stats from shape_at_layer's random forwards
+            self.layers.append(bn)
+            return "layer"
+        if isinstance(sub, nn.PReLU):  # parametric activation
+            self.layers.append(copy.deepcopy(sub))
+            return "layer"
+        # Stateless ops rebuilt via the NN builders.
+        if isinstance(sub, nn.ReLU):
+            self.relu(); return "layer"
+        if isinstance(sub, nn.ReLU6):
+            self.relu6(); return "layer"
+        if isinstance(sub, nn.LeakyReLU):
+            self.leakyrelu(sub.negative_slope); return "layer"
+        if isinstance(sub, nn.ELU):
+            self.elu(sub.alpha); return "layer"
+        if isinstance(sub, nn.CELU):
+            self.celu(sub.alpha); return "layer"
+        if isinstance(sub, nn.SiLU):
+            self.silu(); return "layer"
+        if isinstance(sub, nn.GELU):
+            self.gelu(sub.approximate); return "layer"
+        if isinstance(sub, nn.Mish):
+            self.mish(); return "layer"
+        if isinstance(sub, nn.Sigmoid):
+            self.sigmoid(); return "layer"
+        if isinstance(sub, nn.Hardsigmoid):
+            self.hardsigmoid(); return "layer"
+        if isinstance(sub, nn.Hardswish):
+            self.hardswish(); return "layer"
+        if isinstance(sub, nn.Tanh):
+            self.tanh(); return "layer"
+        if isinstance(sub, nn.Softplus):
+            self.softplus(sub.beta, sub.threshold); return "layer"
+        if isinstance(sub, nn.Softmax):
+            self.softmax(sub.dim); return "layer"
+        if isinstance(sub, nn.MaxPool2d):
+            self.maxpool(sub.kernel_size, sub.stride, sub.padding); return "layer"
+        if isinstance(sub, nn.AdaptiveMaxPool2d):
+            self.adaptivemaxpool(sub.output_size); return "layer"
+        if isinstance(sub, nn.AvgPool2d):
+            self.avgpool(sub.kernel_size, sub.stride, sub.padding); return "layer"
+        if isinstance(sub, nn.AdaptiveAvgPool2d):
+            self.adaptiveavgpool(sub.output_size); return "layer"
+        if isinstance(sub, nn.Flatten):
+            self.flatten(sub.start_dim, sub.end_dim); return "layer"
+        raise NotImplementedError(
+            f"from_torch: unsupported module {type(sub).__name__} at node "
+            f"{node.name}."
+        )
+
+    def _ft_emit_func(self, node: fx.Node) -> str:
+        tgt = node.target
+        is_method = node.op == "call_method"
+        # Flatten.
+        if tgt in (torch.flatten,) or (is_method and tgt == "flatten"):
+            start_dim = _ft_arg(node, 1, "start_dim", 1)
+            end_dim = _ft_arg(node, 2, "end_dim", -1)
+            self.flatten(start_dim, end_dim); return "layer"
+        # Functional activations.
+        if tgt in (F.relu, torch.relu) or (is_method and tgt in ("relu", "relu_")):
+            self.relu(); return "layer"
+        if tgt is F.relu6:
+            self.relu6(); return "layer"
+        if tgt is F.leaky_relu:
+            self.leakyrelu(_ft_arg(node, 1, "negative_slope", 0.01)); return "layer"
+        if tgt is F.elu:
+            self.elu(_ft_arg(node, 1, "alpha", 1.0)); return "layer"
+        if tgt is F.silu:
+            self.silu(); return "layer"
+        if tgt is F.gelu:
+            self.gelu(_ft_arg(node, 1, "approximate", "none")); return "layer"
+        if tgt is F.mish:
+            self.mish(); return "layer"
+        if tgt in (F.sigmoid, torch.sigmoid) or (is_method and tgt == "sigmoid"):
+            self.sigmoid(); return "layer"
+        if tgt is F.hardsigmoid:
+            self.hardsigmoid(); return "layer"
+        if tgt is F.hardswish:
+            self.hardswish(); return "layer"
+        if tgt in (F.tanh, torch.tanh) or (is_method and tgt == "tanh"):
+            self.tanh(); return "layer"
+        if tgt is F.softmax or (is_method and tgt == "softmax"):
+            self.softmax(_ft_arg(node, 1, "dim", None)); return "layer"
+        # Functional pooling.
+        if tgt is F.max_pool2d:
+            self.maxpool(_ft_arg(node, 1, "kernel_size"),
+                         _ft_arg(node, 2, "stride", None),
+                         _ft_arg(node, 3, "padding", 0)); return "layer"
+        if tgt is F.avg_pool2d:
+            self.avgpool(_ft_arg(node, 1, "kernel_size"),
+                         _ft_arg(node, 2, "stride", None),
+                         _ft_arg(node, 3, "padding", 0)); return "layer"
+        if tgt is F.adaptive_avg_pool2d:
+            self.adaptiveavgpool(_ft_arg(node, 1, "output_size")); return "layer"
+        if tgt is F.adaptive_max_pool2d:
+            self.adaptivemaxpool(_ft_arg(node, 1, "output_size")); return "layer"
+        raise NotImplementedError(
+            f"from_torch: unsupported op {tgt} at node {node.name}."
+        )
+
+
     ### Forward Method ###
 
     def forward(self, x: torch.Tensor, return_penultimate:bool=False) -> torch.Tensor:
@@ -736,6 +1046,109 @@ class NN(nn.Module):
             if isinstance(self.layers[1], PositionalEncoding):
                 start_layer = 2
         return start_layer
+
+
+### Helpers for NN.from_torch (torch.fx graph analysis) ###
+
+_FT_ADD_FUNCS = {operator.add, operator.iadd, torch.add}
+
+
+def _ft_is_add(node: fx.Node) -> bool:
+    """True if ``node`` is a tensor-add (candidate residual merge)."""
+    if node.op == "call_function" and node.target in _FT_ADD_FUNCS:
+        return True
+    if node.op == "call_method" and node.target == "add":
+        return True
+    return False
+
+
+def _ft_tensor_inputs(node: fx.Node) -> List[fx.Node]:
+    """The fx.Node tensor producers consumed by ``node`` (args then kwargs)."""
+    out = [a for a in node.args if isinstance(a, fx.Node)]
+    out += [v for v in node.kwargs.values() if isinstance(v, fx.Node)]
+    return out
+
+
+def _ft_ancestors(node: fx.Node) -> set:
+    """All transitive tensor-producing ancestors of ``node`` (excluding it)."""
+    seen: set = set()
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        for inp in _ft_tensor_inputs(n):
+            if inp not in seen:
+                seen.add(inp)
+                stack.append(inp)
+    return seen
+
+
+def _ft_fork(a: fx.Node, b: fx.Node) -> Optional[fx.Node]:
+    """
+        Lowest common ancestor of two add-inputs: the tensor where the main
+        and skip branches diverge. Found by walking back from ``b`` (closest
+        first) until reaching a node that is also an ancestor of ``a``.
+    """
+    anc_a = _ft_ancestors(a)
+    anc_a.add(a)
+    dq = deque([b])
+    visited: set = set()
+    while dq:
+        n = dq.popleft()
+        if n in anc_a:
+            return n
+        if n in visited:
+            continue
+        visited.add(n)
+        for inp in _ft_tensor_inputs(n):
+            dq.append(inp)
+    return None
+
+
+def _ft_dist(node: fx.Node, target: fx.Node) -> Optional[int]:
+    """Shortest edge distance from ``node`` back to ``target`` (0 if equal)."""
+    dq = deque([(node, 0)])
+    visited: set = set()
+    while dq:
+        n, d = dq.popleft()
+        if n is target:
+            return d
+        if n in visited:
+            continue
+        visited.add(n)
+        for inp in _ft_tensor_inputs(n):
+            dq.append((inp, d + 1))
+    return None
+
+
+def _ft_linear_path(skip_arg: fx.Node, fork: fx.Node, merge: fx.Node) -> List[fx.Node]:
+    """
+        Ordered list of nodes on the skip branch from just-after ``fork`` to
+        ``skip_arg`` (inclusive), i.e. the downsample/projection chain. Empty
+        for an identity skip (``skip_arg is fork``). Requires the chain to be
+        linear (single tensor input per hop); otherwise raises.
+    """
+    path: List[fx.Node] = []
+    cur = skip_arg
+    while cur is not fork:
+        path.append(cur)
+        ins = _ft_tensor_inputs(cur)
+        if len(ins) != 1:
+            raise NotImplementedError(
+                f"from_torch: non-linear residual skip branch feeding node "
+                f"{merge.name}; out of MVP scope."
+            )
+        cur = ins[0]
+    path.reverse()
+    return path
+
+
+def _ft_arg(node: fx.Node, idx: int, key: str, default=None):
+    """Read a positional-or-keyword fx call argument with a fallback."""
+    if key in node.kwargs:
+        return node.kwargs[key]
+    if idx < len(node.args):
+        return node.args[idx]
+    return default
 
 
 class RMSNorm(nn.Module):
