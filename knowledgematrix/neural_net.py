@@ -563,6 +563,7 @@ class NN(nn.Module):
             self.acts: list[torch.Tensor] = [None] * self.get_num_layers()
             self.maxpool_indices: list[torch.Tensor] = [None] * self.get_num_layers()
             self.layernorms: list[torch.Tensor] = [None] * self.get_num_layers()
+            self.gated_products: list = [None] * self.get_num_layers()
 
             for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts or i in self.concat_skips_starts:
@@ -598,6 +599,12 @@ class NN(nn.Module):
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
                     self.maxpool_indices[i] = indices
+                elif isinstance(layer, SwiGLU):
+                    u = layer.gate_proj(x)
+                    g = layer.act(u)
+                    v = layer.value_proj(x)
+                    self.gated_products[i] = (u.detach().clone(), g.detach().clone(), v.detach().clone())
+                    x = g * v
                 elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                     self.pre_acts[i] = x.detach().clone()
                     x = layer(x)
