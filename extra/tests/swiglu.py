@@ -101,5 +101,25 @@ class TestSwiGLUAlphaEdge(unittest.TestCase):
         self.assertTrue(any("alpha" in str(x.message) for x in w))
 
 
+from knowledgematrix.neural_net import NN
+
+class TestLlamaFFN(unittest.TestCase):
+    def test_swiglu_ffn_with_rmsnorm(self):
+        torch.manual_seed(0)
+        dim, hidden = 16, 32
+        m = NN(input_shape=(dim,1,1)); m.flatten()
+        m.rmsnorm(dim)          # pre-norm
+        m.swiglu(dim, hidden)   # SiLU(W1 x) * (W2 x)
+        m.linear(hidden, dim)   # down-proj
+        m.eval()
+        x = torch.randn(dim, 1, 1)
+        out = m.forward(x)
+        import warnings as _w
+        with _w.catch_warnings(): _w.simplefilter("ignore")
+        mat = KnowledgeMatrixComputer(m).forward(x)
+        rel = (torch.norm(out - mat.sum(1)) / torch.norm(out)).item()
+        self.assertLess(rel, 1e-9, f"LLaMA-FFN KM invariant broken: rel={rel}")
+
+
 if __name__ == "__main__":
     unittest.main()
