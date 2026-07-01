@@ -4,7 +4,18 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import math
+import warnings
 from typing import Union, Dict, Tuple
+
+
+# Attribution weight for gated products (SwiGLU / SE): M_o = α·diag(v)·M_g + (1−α)·diag(g)·M_v.
+# The knowledge-matrix invariant mat.sum(1)==forward holds for ANY α (each term already
+# row-sums to g⊙v). α ONLY redistributes input-credit between the gate path and the value
+# path — invariant-independent per block, but attribution-relevant for whole-model KM
+# analysis (attribution maps, per-feature importance). 0.5 = symmetric default.
+# Single source of truth: referenced as the default by SwiGLU.__init__ and NN.swiglu, and
+# imported by matrix_computer.py (which imports from neural_net, never the reverse).
+DEFAULT_GATED_PRODUCT_ALPHA = 0.5
 
 
 class NN(nn.Module):
@@ -412,6 +423,10 @@ class NN(nn.Module):
     def topk_activation(self, k: int) -> None:
         self.layers.append(TopKActivation(k=k))
 
+    def swiglu(self, in_features: int, hidden_features: int, activation: str = "silu",
+               bias: bool = True, alpha: float = DEFAULT_GATED_PRODUCT_ALPHA) -> None:
+        self.layers.append(SwiGLU(in_features, hidden_features, activation, bias, alpha))
+
     def multiheadattention(
             self,
             d_model: int,
@@ -559,6 +574,7 @@ class NN(nn.Module):
             self.acts: list[torch.Tensor] = [None] * self.get_num_layers()
             self.maxpool_indices: list[torch.Tensor] = [None] * self.get_num_layers()
             self.layernorms: list[torch.Tensor] = [None] * self.get_num_layers()
+            self.gated_products: list = [None] * self.get_num_layers()
 
             for i, layer in enumerate(self.layers[start_layer:], start=start_layer):
                 if i in self.residuals_starts or i in self.concat_skips_starts:
@@ -594,6 +610,12 @@ class NN(nn.Module):
                 elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveMaxPool2d)):
                     x, indices = layer(x)
                     self.maxpool_indices[i] = indices
+                elif isinstance(layer, SwiGLU):
+                    u = layer.gate_proj(x)
+                    g = layer.act(u)
+                    v = layer.value_proj(x)
+                    self.gated_products[i] = (u.detach().clone(), g.detach().clone(), v.detach().clone())
+                    x = g * v
                 elif isinstance(layer, (nn.ELU, nn.LeakyReLU, nn.ReLU, nn.Sigmoid, nn.Tanh, nn.GELU, nn.SiLU, nn.Mish, nn.Softmax, nn.CELU, nn.Hardsigmoid, nn.Hardswish, nn.PReLU, nn.ReLU6, nn.Softplus, MultiHeadAttention)):
                     self.pre_acts[i] = x.detach().clone()
                     x = layer(x)
@@ -647,7 +669,7 @@ class NN(nn.Module):
 
     def get_matrix_shape(self) -> Tuple[int]:
         # Returns the shape of the knowledge matrix in the format: (rows, columns).
-        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm() or self._has_groupnorm()))
+        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm() or self._has_groupnorm() or self._has_gated_product()))
     
     def _has_bias(self) -> bool:
         for layer in self.layers:
@@ -674,6 +696,18 @@ class NN(nn.Module):
         for layer in self.layers:
             if isinstance(layer, nn.GroupNorm):
                 return True
+        return False
+
+    def _has_gated_product(self) -> bool:
+        # Gates the +1 bias/constant column for SwiGLU blocks: a gated block injects a
+        # constant into the KM either via a projection bias (b1/b2, possibly asymmetric)
+        # or via an activation with act(0)!=0 (e.g. sigmoid), whose origin-shift constant
+        # c=act(0) must land in the bias column. Either case needs the extra column.
+        for l in self.layers:
+            if isinstance(l, SwiGLU):
+                has_bias = l.gate_proj.bias is not None or l.value_proj.bias is not None
+                if has_bias or float(l.act(torch.zeros(()))) != 0.0:
+                    return True
         return False
 
     def get_input_size(self) -> int:
@@ -753,6 +787,56 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return x * self.weight / rms
    
+
+_GATE_ACTIVATIONS = {
+    "silu": nn.SiLU, "gelu": nn.GELU, "relu": nn.ReLU,
+    "sigmoid": nn.Sigmoid, "tanh": nn.Tanh,
+}
+
+
+class SwiGLU(nn.Module):
+    """
+    Gated linear unit: out = act(gate_proj(x)) * value_proj(x).
+    Default act = SiLU ("SwiGLU"). Output width = hidden_features; the LLaMA
+    down-projection is a separate Linear, kept outside this block for
+    composability. `alpha` is the gated-product attribution weight (see
+    KnowledgeMatrixComputer / SPEC-gated-product.md): invariant-independent,
+    attribution-relevant.
+
+    `alpha` is a convex attribution weight in [0, 1] (0.5 = symmetric): it splits
+    input credit between the gate path and the value path. Values outside [0, 1]
+    are allowed for research but make the attribution non-convex; a warning is
+    emitted in that case (the KM invariant still holds for any alpha).
+    """
+    def __init__(
+            self,
+            in_features: int,
+            hidden_features: int,
+            activation: str = "silu",
+            bias: bool = True,
+            alpha: float = DEFAULT_GATED_PRODUCT_ALPHA,
+        ) -> None:
+        super().__init__()
+        if activation not in _GATE_ACTIVATIONS:
+            raise ValueError(f"Unknown gate activation: {activation}. Use one of {list(_GATE_ACTIVATIONS)}.")
+        if not (0.0 <= alpha <= 1.0):
+            warnings.warn(
+                f"SwiGLU alpha={alpha} is outside [0, 1]. alpha is a convex attribution "
+                f"weight (M_o = alpha·diag(v)·M_g + (1-alpha)·diag(g)·M_v); values outside "
+                f"[0, 1] make the attribution non-convex. This is intentionally allowed for "
+                f"research, but is not a standard convex split.",
+                UserWarning,
+            )
+        self.gate_proj = nn.Linear(in_features, hidden_features, bias=bias)
+        self.value_proj = nn.Linear(in_features, hidden_features, bias=bias)
+        self.act = _GATE_ACTIVATIONS[activation]()
+        self.alpha = alpha
+        # Mirror nn.Linear so get_matrix_shape() works when a SwiGLU is the last layer.
+        self.out_features = hidden_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.gate_proj(x)) * self.value_proj(x)
+
 
 class JumpReLU(nn.ReLU):
     """

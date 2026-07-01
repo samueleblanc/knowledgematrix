@@ -1,9 +1,38 @@
 import torch
+import warnings
 from torch import nn
 from typing import Union
 from torch.nn import functional as F
 
-from knowledgematrix.neural_net import NN, MultiHeadAttention, RMSNorm
+from knowledgematrix.neural_net import (
+    NN, MultiHeadAttention, RMSNorm, SwiGLU, DEFAULT_GATED_PRODUCT_ALPHA,
+)
+
+# DEFAULT_GATED_PRODUCT_ALPHA lives in neural_net.py (single source of truth) and is
+# re-exported here for backward compatibility; matrix_computer imports from neural_net,
+# never the reverse (avoids a circular import).
+
+# Distinct alpha values already warned about (once per value, per process). Membership is
+# recorded AFTER the warning is issued so a suppressed or raised (-W error) warning does
+# not mark the alpha as already-warned; later models/blocks with a different alpha still warn.
+_gated_alpha_warned: set = set()
+
+
+def _gated_product(M_g, g, M_v, v, alpha):
+    return alpha * (v * M_g) + (1.0 - alpha) * (g * M_v)
+
+
+def _warn_gated_product_alpha(alpha):
+    if alpha in _gated_alpha_warned:
+        return
+    warnings.warn(
+        f"Knowledge matrix uses a gated-product attribution split with alpha={alpha} "
+        f"(0.5=symmetric). The invariant mat.sum(1)==forward holds for any alpha; alpha "
+        f"only reweights gate-path vs value-path input attribution, which matters for "
+        f"whole-model KM analysis. See SPEC-gated-product.md.",
+        UserWarning,
+    )
+    _gated_alpha_warned.add(alpha)
 
 
 class KnowledgeMatrixComputer:
@@ -123,6 +152,21 @@ class KnowledgeMatrixComputer:
                             vertices
                         ).squeeze(0)  # Remove original batch dim
                         B = B * vertices
+                    elif isinstance(layer, SwiGLU):
+                        _warn_gated_product_alpha(layer.alpha)
+                        u, g, v = self.model.gated_products[i]
+                        u = u.squeeze(0); g = g.squeeze(0); v = v.squeeze(0)   # (hidden,), last axis = features
+                        # Origin-shift: act(u) = ratio*u + c with c=act(0). This is exact even
+                        # when u==0 and act(0)!=0 (sigmoid: c=0.5); a plain g/u would nan->0 and
+                        # silently drop the gate row. c is a constant (no input attribution), so it
+                        # is NOT added in this weff pass -- it lands in the bias column (bias pass).
+                        c = layer.act(torch.zeros((), dtype=u.dtype, device=u.device))
+                        M_u = (layer.gate_proj.weight @ B.transpose(-1, -2)).transpose(-1, -2)   # weight only
+                        ratio = (g - c) / u
+                        ratio = torch.where(torch.isnan(ratio) | torch.isinf(ratio), _zero, ratio)
+                        M_g = M_u * ratio
+                        M_v = (layer.value_proj.weight @ B.transpose(-1, -2)).transpose(-1, -2)  # weight only
+                        B = _gated_product(M_g, g, M_v, v, layer.alpha)
                     elif isinstance(layer, nn.Conv2d):
                         B = F.conv2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding,
                                      dilation=layer.dilation, groups=layer.groups)
@@ -158,7 +202,7 @@ class KnowledgeMatrixComputer:
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
-            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or self.model._has_groupnorm() or len(self.model.residuals) > 0:
+            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or self.model._has_groupnorm() or self.model._has_gated_product() or len(self.model.residuals) > 0:
                 a = torch.zeros(x.shape, device=self.device, dtype=dtype)
                 if len(x.shape) == 3:
                     a = a.unsqueeze(0)
@@ -185,6 +229,19 @@ class KnowledgeMatrixComputer:
                             vertices
                         )
                         a = a * vertices
+                    elif isinstance(layer, SwiGLU):
+                        u, g, v = self.model.gated_products[i]
+                        u = u.squeeze(0); g = g.squeeze(0); v = v.squeeze(0)
+                        # Origin-shift (see weff pass). Here the constant c=act(0) DOES belong:
+                        # this is the bias/constant column, so M_g = ratio*u_contrib + c makes the
+                        # gate row-sum ratio*u + c = (g-c)+c = g exactly (sigmoid u==0 included).
+                        c = layer.act(torch.zeros((), dtype=u.dtype, device=u.device))
+                        M_u = layer.gate_proj(a)     # full linear: W1·a + b1
+                        ratio = (g - c) / u
+                        ratio = torch.where(torch.isnan(ratio) | torch.isinf(ratio), _zero, ratio)
+                        M_g = M_u * ratio + c
+                        M_v = layer.value_proj(a)    # W2·a + b2
+                        a = _gated_product(M_g, g, M_v, v, layer.alpha)
                     elif isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear, nn.Upsample, nn.PixelShuffle)):
                         a = layer(a)
                     elif isinstance(layer, nn.LayerNorm):
