@@ -151,6 +151,16 @@ class KnowledgeMatrixComputer:
                             vertices
                         ).squeeze(0)  # Remove original batch dim
                         B = B * vertices
+                    elif isinstance(layer, SwiGLU):
+                        _warn_gated_product_alpha(layer.alpha)
+                        u, g, v = self.model.gated_products[i]
+                        u = u.squeeze(0); g = g.squeeze(0); v = v.squeeze(0)   # (hidden,), last axis = features
+                        M_u = (layer.gate_proj.weight @ B.transpose(-1, -2)).transpose(-1, -2)   # weight only
+                        ratio = g / u
+                        ratio = torch.where(torch.isnan(ratio) | torch.isinf(ratio), _zero, ratio)
+                        M_g = M_u * ratio
+                        M_v = (layer.value_proj.weight @ B.transpose(-1, -2)).transpose(-1, -2)  # weight only
+                        B = _gated_product(M_g, g, M_v, v, layer.alpha)
                     elif isinstance(layer, nn.Conv2d):
                         B = F.conv2d(B, layer.weight, None, stride=layer.stride, padding=layer.padding,
                                      dilation=layer.dilation, groups=layer.groups)
@@ -186,7 +196,7 @@ class KnowledgeMatrixComputer:
 
             # Process bias and batch norm terms by iterating through layers again
             # Computing activation ratios and applying appropriate transformations
-            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or self.model._has_groupnorm() or len(self.model.residuals) > 0:
+            if self.model._has_bias() or self.model._has_batchnorm() or self.model._has_layernorm() or self.model._has_groupnorm() or self.model._has_gated_product() or len(self.model.residuals) > 0:
                 a = torch.zeros(x.shape, device=self.device, dtype=dtype)
                 if len(x.shape) == 3:
                     a = a.unsqueeze(0)
@@ -213,6 +223,15 @@ class KnowledgeMatrixComputer:
                             vertices
                         )
                         a = a * vertices
+                    elif isinstance(layer, SwiGLU):
+                        u, g, v = self.model.gated_products[i]
+                        u = u.squeeze(0); g = g.squeeze(0); v = v.squeeze(0)
+                        M_u = layer.gate_proj(a)     # full linear: W1·a + b1
+                        ratio = g / u
+                        ratio = torch.where(torch.isnan(ratio) | torch.isinf(ratio), _zero, ratio)
+                        M_g = M_u * ratio
+                        M_v = layer.value_proj(a)    # W2·a + b2
+                        a = _gated_product(M_g, g, M_v, v, layer.alpha)
                     elif isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.BatchNorm2d, nn.Flatten, nn.Linear, nn.Upsample, nn.PixelShuffle)):
                         a = layer(a)
                     elif isinstance(layer, nn.LayerNorm):

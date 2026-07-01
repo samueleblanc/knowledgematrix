@@ -47,5 +47,26 @@ class TestGatedProductHelper(unittest.TestCase):
         self.assertEqual(DEFAULT_GATED_PRODUCT_ALPHA, 0.5)
 
 
+from knowledgematrix.matrix_computer import KnowledgeMatrixComputer
+import warnings as _w
+
+class TestSwiGLUInvariant(unittest.TestCase):
+    def _invariant(self, m, x):
+        m.eval()
+        out = m.forward(x)
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            mat = KnowledgeMatrixComputer(m).forward(x)
+        rel = (torch.norm(out - mat.sum(1)) / torch.norm(out)).item()
+        self.assertLess(rel, 1e-9, f"KM invariant broken: rel={rel}")
+        self.assertEqual(tuple(mat.shape), (out.reshape(-1).shape[0], x.numel() + 1))
+
+    def test_mlp_with_swiglu(self):
+        torch.manual_seed(0)
+        m = NN(input_shape=(12,1,1)); m.flatten()
+        m.linear(12, 12); m.relu(); m.swiglu(12, 24); m.linear(24, 5)
+        self._invariant(m, torch.randn(12, 1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

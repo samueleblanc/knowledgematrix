@@ -658,7 +658,7 @@ class NN(nn.Module):
 
     def get_matrix_shape(self) -> Tuple[int]:
         # Returns the shape of the knowledge matrix in the format: (rows, columns).
-        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm() or self._has_groupnorm()))
+        return (self.layers[-1].out_features, self.get_input_size() + int(self._has_bias() or self._has_batchnorm() or self._has_layernorm() or self._has_groupnorm() or self._has_gated_product()))
     
     def _has_bias(self) -> bool:
         for layer in self.layers:
@@ -686,6 +686,9 @@ class NN(nn.Module):
             if isinstance(layer, nn.GroupNorm):
                 return True
         return False
+
+    def _has_gated_product(self) -> bool:
+        return any(isinstance(l, SwiGLU) and l.gate_proj.bias is not None for l in self.layers)
 
     def get_input_size(self) -> int:
         input_size = 1
