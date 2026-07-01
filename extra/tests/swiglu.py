@@ -68,5 +68,38 @@ class TestSwiGLUInvariant(unittest.TestCase):
         self._invariant(m, torch.randn(12, 1, 1))
 
 
+class TestSwiGLUAlphaEdge(unittest.TestCase):
+    def _rel(self, m, x):
+        m.eval(); out = m.forward(x)
+        import warnings as _w
+        with _w.catch_warnings(): _w.simplefilter("ignore")
+        mat = KnowledgeMatrixComputer(m).forward(x)
+        return (torch.norm(out - mat.sum(1)) / torch.norm(out)).item()
+
+    def test_invariant_holds_across_alpha(self):
+        for alpha in (0.0, 0.25, 0.5, 1.0):
+            torch.manual_seed(1)
+            m = NN(input_shape=(10,1,1)); m.flatten(); m.swiglu(10, 20, alpha=alpha); m.linear(20, 4)
+            self.assertLess(self._rel(m, torch.randn(10,1,1)), 1e-9, f"alpha={alpha}")
+
+    def test_zero_input_finite(self):
+        torch.manual_seed(2)
+        m = NN(input_shape=(10,1,1)); m.flatten(); m.swiglu(10, 20); m.linear(20, 4); m.eval()
+        x = torch.zeros(10, 1, 1)
+        mat = KnowledgeMatrixComputer(m).forward(x)
+        self.assertTrue(torch.isfinite(mat).all())
+
+    def test_warning_emitted(self):
+        import warnings as _w
+        import knowledgematrix.matrix_computer as mc
+        mc._gated_alpha_warned = False
+        torch.manual_seed(3)
+        m = NN(input_shape=(10,1,1)); m.flatten(); m.swiglu(10, 20); m.linear(20, 4); m.eval()
+        with _w.catch_warnings(record=True) as w:
+            _w.simplefilter("always")
+            KnowledgeMatrixComputer(m).forward(torch.randn(10,1,1))
+        self.assertTrue(any("alpha" in str(x.message) for x in w))
+
+
 if __name__ == "__main__":
     unittest.main()
