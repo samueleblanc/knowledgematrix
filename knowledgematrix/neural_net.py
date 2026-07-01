@@ -412,6 +412,10 @@ class NN(nn.Module):
     def topk_activation(self, k: int) -> None:
         self.layers.append(TopKActivation(k=k))
 
+    def swiglu(self, in_features: int, hidden_features: int, activation: str = "silu",
+               bias: bool = True, alpha: float = 0.5) -> None:
+        self.layers.append(SwiGLU(in_features, hidden_features, activation, bias, alpha))
+
     def multiheadattention(
             self,
             d_model: int,
@@ -753,6 +757,34 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return x * self.weight / rms
    
+
+_GATE_ACTIVATIONS = {
+    "silu": nn.SiLU, "gelu": nn.GELU, "relu": nn.ReLU,
+    "sigmoid": nn.Sigmoid, "tanh": nn.Tanh,
+}
+
+
+class SwiGLU(nn.Module):
+    """
+    Gated linear unit: out = act(gate_proj(x)) * value_proj(x).
+    Default act = SiLU ("SwiGLU"). Output width = hidden_features; the LLaMA
+    down-projection is a separate Linear, kept outside this block for
+    composability. `alpha` is the gated-product attribution weight (see
+    KnowledgeMatrixComputer / SPEC-gated-product.md): invariant-independent,
+    attribution-relevant.
+    """
+    def __init__(self, in_features, hidden_features, activation="silu", bias=True, alpha=0.5):
+        super().__init__()
+        if activation not in _GATE_ACTIVATIONS:
+            raise ValueError(f"Unknown gate activation: {activation}. Use one of {list(_GATE_ACTIVATIONS)}.")
+        self.gate_proj = nn.Linear(in_features, hidden_features, bias=bias)
+        self.value_proj = nn.Linear(in_features, hidden_features, bias=bias)
+        self.act = _GATE_ACTIVATIONS[activation]()
+        self.alpha = alpha
+
+    def forward(self, x):
+        return self.act(self.gate_proj(x)) * self.value_proj(x)
+
 
 class JumpReLU(nn.ReLU):
     """
