@@ -89,6 +89,32 @@ class TestSwiGLUAlphaEdge(unittest.TestCase):
         mat = KnowledgeMatrixComputer(m).forward(x)
         self.assertTrue(torch.isfinite(mat).all())
 
+    def test_deep_middle_placement_random_alpha(self):
+        # gated block in the MIDDLE of a deep net, several layers AFTER it, RANDOM alpha each trial.
+        for trial in range(8):
+            torch.manual_seed(100 + trial)
+            alpha = float(torch.rand(1).item())
+            m = NN(input_shape=(12,1,1)); m.flatten()
+            m.linear(12, 16); m.relu()
+            m.swiglu(16, 20, alpha=alpha)
+            m.linear(20, 16); m.relu()
+            m.linear(16, 8); m.gelu()
+            m.linear(8, 4)
+            self.assertLess(self._rel(m, torch.randn(12,1,1)), 1e-9, f"trial={trial} alpha={alpha}")
+
+    def test_multiple_gated_blocks_random_alpha(self):
+        # two SwiGLU blocks, each its OWN random alpha, separated + followed by other layers.
+        for trial in range(8):
+            torch.manual_seed(200 + trial)
+            a1 = float(torch.rand(1).item()); a2 = float(torch.rand(1).item())
+            m = NN(input_shape=(10,1,1)); m.flatten()
+            m.linear(10, 16); m.relu()
+            m.swiglu(16, 24, alpha=a1)
+            m.linear(24, 16); m.relu()
+            m.swiglu(16, 20, alpha=a2)
+            m.linear(20, 6)
+            self.assertLess(self._rel(m, torch.randn(10,1,1)), 1e-9, f"trial={trial} a1={a1} a2={a2}")
+
     def test_warning_emitted(self):
         import warnings as _w
         import knowledgematrix.matrix_computer as mc
