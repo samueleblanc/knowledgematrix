@@ -32,5 +32,20 @@ class TestSwiGLUSave(unittest.TestCase):
         self.assertLess(torch.norm(v - blk.value_proj(xf)).item(), 1e-12)
 
 
+from knowledgematrix.matrix_computer import _gated_product, DEFAULT_GATED_PRODUCT_ALPHA
+
+class TestGatedProductHelper(unittest.TestCase):
+    def test_rowsum_is_g_times_v_any_alpha(self):
+        torch.manual_seed(0)
+        cols, hid = 5, 7
+        M_g = torch.randn(cols, hid); M_v = torch.randn(cols, hid)
+        g = M_g.sum(0); v = M_v.sum(0)          # branch "row-sums" over the column axis (dim 0 here)
+        # emulate the KM layout: features on last axis, columns on dim 0
+        for alpha in (0.0, 0.5, 1.0):
+            M_o = _gated_product(M_g, g, M_v, v, alpha)
+            self.assertLess(torch.norm(M_o.sum(0) - g * v).item(), 1e-10)
+        self.assertEqual(DEFAULT_GATED_PRODUCT_ALPHA, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

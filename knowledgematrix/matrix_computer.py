@@ -1,9 +1,37 @@
 import torch
+import warnings
 from torch import nn
 from typing import Union
 from torch.nn import functional as F
 
-from knowledgematrix.neural_net import NN, MultiHeadAttention, RMSNorm
+from knowledgematrix.neural_net import NN, MultiHeadAttention, RMSNorm, SwiGLU
+
+
+# Attribution weight for gated products (SwiGLU / SE): M_o = α·diag(v)·M_g + (1−α)·diag(g)·M_v.
+# The knowledge-matrix invariant mat.sum(1)==forward holds for ANY α (each term already
+# row-sums to g⊙v). α ONLY redistributes input-credit between the gate path and the value
+# path — invariant-independent per block, but attribution-relevant for whole-model KM
+# analysis (attribution maps, per-feature importance). 0.5 = symmetric default.
+DEFAULT_GATED_PRODUCT_ALPHA = 0.5
+
+_gated_alpha_warned = False
+
+
+def _gated_product(M_g, g, M_v, v, alpha):
+    return alpha * (v * M_g) + (1.0 - alpha) * (g * M_v)
+
+
+def _warn_gated_product_alpha(alpha):
+    global _gated_alpha_warned
+    if not _gated_alpha_warned:
+        _gated_alpha_warned = True
+        warnings.warn(
+            f"Knowledge matrix uses a gated-product attribution split with alpha={alpha} "
+            f"(0.5=symmetric). The invariant mat.sum(1)==forward holds for any alpha; alpha "
+            f"only reweights gate-path vs value-path input attribution, which matters for "
+            f"whole-model KM analysis. See SPEC-gated-product.md.",
+            UserWarning,
+        )
 
 
 class KnowledgeMatrixComputer:
